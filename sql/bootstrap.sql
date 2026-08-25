@@ -69,6 +69,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS leads_staging_source_dedupe_key_uidx
   ON public.leads_staging (source_dedupe_key)
   WHERE source_dedupe_key IS NOT NULL;
 
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'leads_staging_source_dedupe_key_key'
+      AND conrelid = 'public.leads_staging'::regclass
+  ) THEN
+    ALTER TABLE public.leads_staging
+      ADD CONSTRAINT leads_staging_source_dedupe_key_key UNIQUE (source_dedupe_key);
+  END IF;
+END
+$$;
+
 CREATE INDEX IF NOT EXISTS sg_engager_inbox_status_id_idx
   ON public.sg_engager_inbox (status, id);
 
