@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { newerThanHwm, normalizeLead } from "../src/clients/getleads.js";
+// cleanEmployees is covered via normalizeLead
 import { toWebhookLead } from "../src/clients/webhook.js";
 import { applyEmploymentCurrency, applyProspectGates, histogramBucket, isNoiseTitle } from "../src/gates/prospect.js";
 import { companiesMatch, hashedProfileId, normCompany, normFirstName, sizeBandStatus } from "../src/normalize.js";
@@ -93,6 +94,11 @@ describe("normalize + size", () => {
 });
 
 describe("pull cursor + webhook map", () => {
+  it("treats em-dash employee bands as missing", () => {
+    assert.equal(normalizeLead({ leadId: "x", engagerEmployees: "—" }).engagerEmployees, null);
+    assert.equal(normalizeLead({ leadId: "x", engagerEmployees: "11 to 50" }).engagerEmployees, "11 to 50");
+  });
+
   it("uses getleads leadId as dedupeKey and keeps only rows newer than HWM", () => {
     const raw = normalizeLead({
       leadId: "fffc59088618b8abdd62fb75a4b74491",

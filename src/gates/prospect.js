@@ -93,7 +93,7 @@ export function applyProspectGates(leads, { recencyDays = 90, suppression, now }
       drops.no_dedupe_key += 1;
       continue;
     }
-    const days = ageDays(lead.engagementDate, now);
+    const days = ageDays(lead.engagementDate || lead.postDate, now);
     bump(ageHistogram, histogramBucket(days));
     bump(byEnrichment, lead.enrichmentStatus || (lead.engagerEmail ? "succeeded" : "failed"));
     bump(bySizeBand, lead.engagerEmployees || "unknown");

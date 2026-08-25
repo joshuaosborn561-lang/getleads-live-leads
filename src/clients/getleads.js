@@ -86,7 +86,7 @@ export function normalizeLead(raw) {
     enrichedAt: raw.enrichedAt || raw.enriched_at || null,
     engagerEmail: raw.engagerEmail || raw.engager_email || null,
     engagerCompany: raw.engagerCompany || raw.engager_company || null,
-    engagerEmployees: raw.engagerEmployees || raw.engager_employees || null,
+    engagerEmployees: cleanEmployees(raw.engagerEmployees || raw.engager_employees),
     engagerCity: raw.engagerCity || raw.engager_city || null,
     engagerCountry: raw.engagerCountry || raw.engager_country || null,
     engagerSeniority: raw.engagerSeniority || raw.engager_seniority || null,
@@ -96,6 +96,15 @@ export function normalizeLead(raw) {
     engagerHeadline: raw.engagerHeadline || raw.engager_headline || null,
     engagerCompanyWebsite: raw.engagerCompanyWebsite || raw.engager_company_website || null,
   };
+}
+
+const EMPTY_BANDS = new Set(["", "—", "–", "-", "unknown", "n/a", "na", "none", "null"]);
+
+export function cleanEmployees(value) {
+  if (value == null) return null;
+  const s = String(value).trim();
+  if (!s || EMPTY_BANDS.has(s.toLowerCase()) || EMPTY_BANDS.has(s)) return null;
+  return s;
 }
 
 export function newerThanHwm(lead, hwmCapturedAt) {
