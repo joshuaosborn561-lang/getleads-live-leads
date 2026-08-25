@@ -43,8 +43,16 @@ function extractText(result) {
   return null;
 }
 
-export function createMcpClient({ url, headers = {}, fetchImpl = globalThis.fetch, timeoutMs = 60_000 }) {
+export function createMcpClient({
+  url,
+  headers = {},
+  fetchImpl = globalThis.fetch,
+  timeoutMs = 60_000,
+  clientName = "sg-engager-pipeline",
+}) {
   let nextId = 1;
+  let sessionId = null;
+  let initialized = false;
 
   async function rpc(method, params, { notification = false, timeout = timeoutMs } = {}) {
     const body = notification
@@ -59,10 +67,13 @@ export function createMcpClient({ url, headers = {}, fetchImpl = globalThis.fetc
           "content-type": "application/json",
           accept: "application/json, text/event-stream",
           ...headers,
+          ...(sessionId ? { "mcp-session-id": sessionId } : {}),
         },
         body: JSON.stringify(body),
         signal: controller.signal,
       });
+      const nextSession = res.headers?.get?.("mcp-session-id");
+      if (nextSession) sessionId = nextSession;
       const text = await res.text();
       if (notification) return { status: res.status };
       const parsed = parseSseOrJson(text);
@@ -78,10 +89,22 @@ export function createMcpClient({ url, headers = {}, fetchImpl = globalThis.fetc
     }
   }
 
+  async function ensureSession() {
+    if (initialized) return;
+    await rpc("initialize", {
+      protocolVersion: "2024-11-05",
+      capabilities: {},
+      clientInfo: { name: clientName, version: "1.0.0" },
+    });
+    await rpc("notifications/initialized", {}, { notification: true });
+    initialized = true;
+  }
+
   async function callTool(name, args = {}, options = {}) {
+    await ensureSession();
     const payload = await rpc("tools/call", { name, arguments: args }, options);
     return unwrapToolResult(payload);
   }
 
-  return { rpc, callTool };
+  return { rpc, callTool, ensureSession };
 }

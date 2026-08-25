@@ -9,6 +9,7 @@ import { toStagingRow } from "../src/gates/stage.js";
 import { wouldExceedCap } from "../src/spend.js";
 import { sanitizeLogExtra } from "../src/logger.js";
 import { withBackoff } from "../src/http.js";
+import { createMcpClient } from "../src/clients/mcp.js";
 
 function row(overrides = {}) {
   return {
@@ -218,6 +219,31 @@ describe("spend + location + logs + backoff", () => {
       spend_cents: 1.2,
     });
     assert.deepEqual(extra, { verified: 3, spend_cents: 1.2 });
+  });
+
+  it("initializes the MCP session before the first tools/call", async () => {
+    const calls = [];
+    const fetchImpl = async (_url, options) => {
+      const body = JSON.parse(options.body);
+      calls.push(body.method);
+      const headers = new Headers();
+      if (body.method === "initialize") headers.set("mcp-session-id", "sess-1");
+      return {
+        ok: true,
+        status: 200,
+        headers,
+        text: async () =>
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: body.id ?? 1,
+            result: body.method === "tools/call" ? { content: [{ type: "text", text: "{\"ok\":true}" }] } : {},
+          }),
+      };
+    };
+    const mcp = createMcpClient({ url: "https://mcp.test/mcp", fetchImpl });
+    const result = await mcp.callTool("start_verification", { file_url: "https://files.test/a.csv", segment_name: "x" });
+    assert.deepEqual(calls, ["initialize", "notifications/initialized", "tools/call"]);
+    assert.deepEqual(result, { ok: true });
   });
 
   it("retries three times then throws", async () => {
