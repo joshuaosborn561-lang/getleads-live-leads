@@ -1,6 +1,14 @@
 import { chunk } from "./clients/webhook.js";
 import { applyEmploymentCurrency } from "./gates/prospect.js";
-import { cleanSizeBand, domainFromWebsite, linkedinSlug, normCompany, normFirstName } from "./normalize.js";
+import {
+  cleanSizeBand,
+  companyLinkedinSlug,
+  domainFromWebsite,
+  hashedProfileId,
+  linkedinSlug,
+  normCompany,
+  normFirstName,
+} from "./normalize.js";
 import { addSpend, wouldExceedCap } from "./spend.js";
 import { emailDomain, normalizeEmail } from "./util/email.js";
 
@@ -40,13 +48,58 @@ export function isFreemail(domain) {
 }
 
 export function matchApifyItem(lead, items) {
+  const hash = hashedProfileId(lead.engagerLinkedinUrl);
   const slug = linkedinSlug(lead.engagerLinkedinUrl);
+  const keys = [...new Set([hash, slug].filter(Boolean).map((s) => s.toLowerCase()))];
+  if (!keys.length) return null;
   return (
-    items.find((item) => item.linkedinUrl && linkedinSlug(item.linkedinUrl) === slug) ||
-    items.find((item) => item.publicIdentifier && item.publicIdentifier.toLowerCase() === slug) ||
-    items.find((item) => item.query && String(item.query).includes(slug)) ||
+    items.find((item) => {
+      const candidates = [
+        item.id,
+        item.profileId,
+        item.query,
+        item.publicIdentifier,
+        linkedinSlug(item.linkedinUrl),
+      ]
+        .filter(Boolean)
+        .map((s) => String(s).toLowerCase());
+      return keys.some((key) => candidates.some((c) => c === key || c.includes(key)));
+    }) || null
+  );
+}
+
+export function matchCompanyItem(lead, items) {
+  const slug = companyLinkedinSlug(lead.companyLinkedinUrl);
+  if (!slug) return null;
+  return (
+    items.find((item) => companyLinkedinSlug(item.linkedinUrl) === slug) ||
+    items.find((item) => String(item.universalName || "").toLowerCase() === slug) ||
+    items.find((item) => String(item.id || "").toLowerCase() === slug) ||
     null
   );
+}
+
+export function applyProfileItem(lead, item) {
+  if (!item) return false;
+  let changed = false;
+  if (item.company) {
+    const currency = applyEmploymentCurrency(lead, item.company);
+    lead.engagerCompany = currency.company;
+    lead.employmentMismatch = currency.mismatch;
+    lead.companySource = currency.source;
+    changed = true;
+  }
+  if (item.employees) {
+    lead.engagerEmployees = item.employees;
+    changed = true;
+  }
+  if (item.companyLinkedinUrl) lead.companyLinkedinUrl = item.companyLinkedinUrl;
+  if (item.title) lead.engagerJobTitle = item.title;
+  if (item.city) lead.engagerCity = item.city;
+  if (item.country) lead.engagerCountry = item.country;
+  if (item.website) lead.engagerCompanyWebsite = item.website;
+  lead.companyDomain = domainFromWebsite(item.website) || lead.companyDomain;
+  return changed;
 }
 
 export async function resolveCompanies({ leads, apify, config, spend, supabase, log, cap }) {
@@ -91,20 +144,7 @@ export async function resolveCompanies({ leads, apify, config, spend, supabase, 
       });
       for (const lead of part) {
         const item = matchApifyItem(lead, result.items);
-        if (!item?.company && !item?.employees) continue;
-        if (item.company) {
-          const currency = applyEmploymentCurrency(lead, item.company);
-          lead.engagerCompany = currency.company;
-          lead.employmentMismatch = currency.mismatch;
-          lead.companySource = currency.source;
-        }
-        if (item.employees) lead.engagerEmployees = item.employees;
-        if (item.title) lead.engagerJobTitle = item.title;
-        if (item.city) lead.engagerCity = item.city;
-        if (item.country) lead.engagerCountry = item.country;
-        if (item.website) lead.engagerCompanyWebsite = item.website;
-        lead.companyDomain = domainFromWebsite(item.website) || lead.companyDomain;
-        if (item.company || item.employees) stats.resolved += 1;
+        if (applyProfileItem(lead, item)) stats.resolved += 1;
       }
     } catch (err) {
       stats.errors += part.length;
@@ -114,7 +154,74 @@ export async function resolveCompanies({ leads, apify, config, spend, supabase, 
     }
   }
 
+  if (apify?.scrapeCompanies) {
+    current = await resolveCompanySizes({
+      leads: out,
+      apify,
+      config,
+      spend: current,
+      supabase,
+      log,
+      cap,
+      stats,
+    });
+  }
+
   return { leads: out, stats, spend: current };
+}
+
+export async function resolveCompanySizes({ leads, apify, config, spend, supabase, log, cap, stats }) {
+  let current = spend;
+  const need = leads.filter((l) => !cleanSizeBand(l.engagerEmployees) && l.companyLinkedinUrl);
+  if (!need.length) return current;
+  const urls = [...new Set(need.map((l) => l.companyLinkedinUrl).filter(Boolean))];
+  const estimate = urls.length * config.apifyCentsPerProfile;
+  if (wouldExceedCap(current.spendCents, estimate, cap)) {
+    stats.skipped_cap += need.length;
+    await logCap(log, "apify-company", current, cap, estimate);
+    return current;
+  }
+  try {
+    const result = await apify.scrapeCompanies(urls, {
+      maxTotalChargeUsd: Math.max(0.05, estimate / 100 + 0.1),
+    });
+    const cents = result.usageTotalUsd
+      ? Number(result.usageTotalUsd) * 100
+      : urls.length * config.apifyCentsPerProfile;
+    if (cents > 0) {
+      current = await addSpend(supabase, "apify", cents);
+      stats.spend_cents += cents;
+    }
+    log.info("apify company run complete", {
+      run_id: result.runId,
+      count: urls.length,
+      resolved_items: result.items.length,
+      spend_cents: cents,
+    });
+    for (const lead of need) {
+      const item = matchCompanyItem(lead, result.items);
+      if (!item) continue;
+      if (item.employees) {
+        lead.engagerEmployees = item.employees;
+        stats.resolved += 1;
+      }
+      if (item.website) {
+        lead.engagerCompanyWebsite = item.website;
+        lead.companyDomain = domainFromWebsite(item.website) || lead.companyDomain;
+      }
+      if (item.name && !lead.engagerCompany) {
+        lead.engagerCompany = item.name;
+        lead.companySource = "linkedin";
+      }
+    }
+  } catch (err) {
+    stats.errors += need.length;
+    log.warn("apify company scrape failed", {
+      error: String(err.message || err).slice(0, 200),
+      count: urls.length,
+    });
+  }
+  return current;
 }
 
 export async function resolveEmails({ leads, waterfall, config, spend, supabase, log, cap }) {

@@ -13,8 +13,8 @@ import {
   sizeBandStatus,
 } from "../src/normalize.js";
 import { filterNewLeads } from "../src/pull.js";
-import { companyDomainOf, needsCompany, resolveCompanies } from "../src/resolve.js";
-import { mapApifyProfile } from "../src/clients/apify.js";
+import { companyDomainOf, matchApifyItem, needsCompany, resolveCompanies } from "../src/resolve.js";
+import { mapApifyCompany, mapApifyProfile } from "../src/clients/apify.js";
 import { nextParkedStatus } from "../src/parked.js";
 
 function lead(overrides = {}) {
@@ -169,6 +169,35 @@ describe("pull cursor + webhook map", () => {
     assert.equal(mapped.employees, "11 to 50");
     assert.equal(mapped.website, "https://www.acme.com");
     assert.equal(mapped.title, "VP Sales");
+    const hashed = mapApifyProfile({
+      id: "ACoAAA8BYqEBCGLg_vT_ca6mMEqkpp9nVffJ3hc",
+      linkedinUrl: "https://www.linkedin.com/in/jane-doe",
+      publicIdentifier: "jane-doe",
+      originalQuery: { profileId: "ACoAAA8BYqEBCGLg_vT_ca6mMEqkpp9nVffJ3hc" },
+      currentPosition: [
+        {
+          companyName: "Acme Inc",
+          companyLinkedinUrl: "https://www.linkedin.com/company/acme-inc",
+        },
+      ],
+    });
+    assert.equal(hashed.profileId, "ACoAAA8BYqEBCGLg_vT_ca6mMEqkpp9nVffJ3hc");
+    assert.equal(hashed.companyLinkedinUrl, "https://www.linkedin.com/company/acme-inc");
+    const matched = matchApifyItem(
+      { engagerLinkedinUrl: "https://www.linkedin.com/in/ACoAAA8BYqEBCGLg_vT_ca6mMEqkpp9nVffJ3hc" },
+      [hashed],
+    );
+    assert.equal(matched.company, "Acme Inc");
+    assert.equal(
+      mapApifyCompany({
+        linkedinUrl: "https://www.linkedin.com/company/acme-inc",
+        universalName: "acme-inc",
+        website: "https://acme.com",
+        employeeCount: 120,
+        employeeCountRange: { start: 51, end: 200 },
+      }).employees,
+      "51 to 200",
+    );
   });
 
   it("calls Apify when a company name exists but the size band does not", async () => {
@@ -218,6 +247,65 @@ describe("pull cursor + webhook map", () => {
     assert.equal(calls[0], 1);
     assert.equal(result.leads[0].engagerEmployees, "11 to 50");
     assert.equal(result.stats.resolved, 1);
+  });
+
+  it("looks up company size from the company actor when the profile scrape has no headcount", async () => {
+    const companyCalls = [];
+    const result = await resolveCompanies({
+      leads: [
+        {
+          dedupeKey: "x",
+          engagerCompany: "Acme",
+          engagerEmployees: null,
+          engagerLinkedinUrl: "https://www.linkedin.com/in/ACoAAA8BYqEBCGLg_vT_ca6mMEqkpp9nVffJ3hc",
+        },
+      ],
+      apify: {
+        async scrapeProfiles() {
+          return {
+            items: [
+              {
+                id: "ACoAAA8BYqEBCGLg_vT_ca6mMEqkpp9nVffJ3hc",
+                profileId: "ACoAAA8BYqEBCGLg_vT_ca6mMEqkpp9nVffJ3hc",
+                company: "Acme",
+                companyLinkedinUrl: "https://www.linkedin.com/company/acme-inc",
+              },
+            ],
+            usageTotalUsd: 0,
+            runId: "p1",
+          };
+        },
+        async scrapeCompanies(urls) {
+          companyCalls.push(urls.length);
+          return {
+            items: [
+              {
+                linkedinUrl: "https://www.linkedin.com/company/acme-inc",
+                employees: "51 to 200",
+                website: "https://acme.com",
+              },
+            ],
+            usageTotalUsd: 0.004,
+            runId: "c1",
+          };
+        },
+      },
+      config: { apifyToken: "t", apifyBatchSize: 50, apifyCentsPerProfile: 0.4 },
+      spend: { spendCents: 0 },
+      supabase: {
+        async rpc(name, args) {
+          return {
+            data: { month_key: "2026-08", apify_cents: args?.p_cents || 0, waterfall_cents: 0, verifier_cents: 0 },
+            error: null,
+          };
+        },
+      },
+      log: { info() {}, warn() {} },
+      cap: 500,
+    });
+    assert.equal(companyCalls[0], 1);
+    assert.equal(result.leads[0].engagerEmployees, "51 to 200");
+    assert.equal(result.leads[0].companyDomain, "acme.com");
   });
 
   it("re-gates parked placeholder bands as missing size, not dq_size", () => {

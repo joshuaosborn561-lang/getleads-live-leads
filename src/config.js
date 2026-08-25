@@ -54,6 +54,7 @@ export function loadConfig(env = process.env, argv = process.argv) {
     getleadsBaseUrl: str(env, "GETLEADS_BASE_URL", "https://app.getleads.io").replace(/\/$/, ""),
     apifyToken: str(env, "APIFY_TOKEN"),
     apifyActor: str(env, "APIFY_ACTOR", "harvestapi/linkedin-profile-scraper"),
+    apifyCompanyActor: str(env, "APIFY_COMPANY_ACTOR", "harvestapi/linkedin-company"),
     emailWaterfallMcpUrl: str(
       env,
       "EMAIL_WATERFALL_MCP_URL",

@@ -32,13 +32,21 @@ export function mapApifyProfile(item) {
     companyObj.employeeCount ?? item?.employeeCount,
     companyObj.employeeCountRange ?? item?.employeeCountRange,
   );
-  const query = item?.originalQuery?.url || item?.originalQuery?.query || item?.linkedinUrl || null;
+  const profileId = item?.originalQuery?.profileId || item?.id || null;
+  const query =
+    item?.originalQuery?.profileId ||
+    item?.originalQuery?.url ||
+    item?.originalQuery?.query ||
+    item?.linkedinUrl ||
+    null;
   return {
     query,
     id: item?.id || null,
+    profileId,
     publicIdentifier: item?.publicIdentifier || null,
     linkedinUrl: item?.linkedinUrl || null,
     company,
+    companyLinkedinUrl: current.companyLinkedinUrl || present.companyLinkedinUrl || null,
     title,
     location,
     website,
@@ -46,6 +54,17 @@ export function mapApifyProfile(item) {
     headline: item?.headline || null,
     city: item?.location?.parsed?.city || null,
     country: item?.location?.parsed?.country || null,
+  };
+}
+
+export function mapApifyCompany(item) {
+  return {
+    id: item?.id || null,
+    linkedinUrl: item?.linkedinUrl || item?.url || null,
+    universalName: item?.universalName || null,
+    name: item?.name || null,
+    website: item?.website || item?.websiteUrl || null,
+    employees: bandFromEmployeeCount(item?.employeeCount, item?.employeeCountRange),
   };
 }
 
@@ -95,5 +114,49 @@ export function createApify(config, deps = {}) {
     };
   }
 
-  return { scrapeProfiles };
+  async function scrapeCompanies(urls, { timeout = 600, waitSecs = 660, maxTotalChargeUsd } = {}) {
+    const companies = [
+      ...new Set(
+        (urls || [])
+          .map((u) => String(u || "").trim().split("?")[0].replace(/\/+$/, ""))
+          .filter((u) => /linkedin\.com\/company\//i.test(u)),
+      ),
+    ];
+    if (!companies.length) return { items: [], usageTotalUsd: 0, runId: null };
+    if (!clientFactory && !config.apifyToken) {
+      throw new Error("APIFY_TOKEN missing");
+    }
+
+    const run = await withBackoff(async () => {
+      const { ApifyClient } = await import("apify-client");
+      const client = clientFactory
+        ? clientFactory()
+        : new ApifyClient({ token: config.apifyToken });
+      return client.actor(config.apifyCompanyActor || "harvestapi/linkedin-company").call(
+        { companies },
+        { timeout, waitSecs, maxTotalChargeUsd },
+      );
+    });
+
+    let items = [];
+    if (deps.listCompanyItems) {
+      items = await deps.listCompanyItems(run);
+    } else {
+      const { ApifyClient } = await import("apify-client");
+      const client = clientFactory
+        ? clientFactory()
+        : new ApifyClient({ token: config.apifyToken });
+      const listed = await client.dataset(run.defaultDatasetId).listItems();
+      items = listed.items || [];
+    }
+
+    return {
+      items: items.map(mapApifyCompany),
+      usageTotalUsd: Number(run.usageTotalUsd || 0),
+      chargedEventCounts: run.chargedEventCounts || {},
+      runId: run.id || null,
+    };
+  }
+
+  return { scrapeProfiles, scrapeCompanies };
 }

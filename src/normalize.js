@@ -56,6 +56,12 @@ export function hashedProfileId(urlOrId) {
   return "";
 }
 
+export function companyLinkedinSlug(url) {
+  if (!url) return "";
+  const m = String(url).toLowerCase().match(/linkedin\.com\/company\/([^/?#]+)/);
+  return m ? decodeURIComponent(m[1]).replace(/\/+$/, "") : "";
+}
+
 export function domainFromWebsite(value) {
   if (!value) return "";
   let raw = String(value).trim();
