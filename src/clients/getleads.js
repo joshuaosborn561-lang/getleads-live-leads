@@ -1,4 +1,5 @@
 import { requestJson, withBackoff } from "../http.js";
+import { cleanSizeBand } from "../normalize.js";
 
 export function createGetleads(config, deps = {}) {
   const fetchImpl = deps.fetchImpl ?? globalThis.fetch;
@@ -98,13 +99,8 @@ export function normalizeLead(raw) {
   };
 }
 
-const EMPTY_BANDS = new Set(["", "—", "–", "-", "unknown", "n/a", "na", "none", "null"]);
-
 export function cleanEmployees(value) {
-  if (value == null) return null;
-  const s = String(value).trim();
-  if (!s || EMPTY_BANDS.has(s.toLowerCase()) || EMPTY_BANDS.has(s)) return null;
-  return s;
+  return cleanSizeBand(value);
 }
 
 export function newerThanHwm(lead, hwmCapturedAt) {

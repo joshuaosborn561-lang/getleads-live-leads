@@ -42,7 +42,11 @@ export async function releaseToPending(supabase, keys) {
 }
 
 export async function fetchByStatus(supabase, statuses, extraFilter = {}) {
-  let q = supabase.from("sg_engager_inbox").select("*").in("status", statuses).order("id", { ascending: true });
+  let q = supabase.from("sg_engager_inbox").select("*").in("status", statuses);
+  const orders = extraFilter.orders || [["id", { ascending: true }]];
+  for (const [column, options] of orders) {
+    q = q.order(column, options);
+  }
   if (extraFilter.limit) q = q.limit(extraFilter.limit);
   const { data, error } = await q;
   throwIfError({ error }, "inbox select");

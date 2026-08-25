@@ -35,7 +35,11 @@ function startServer(port, { getState, getFeedCsv }) {
           res.end("not found");
           return;
         }
-        res.writeHead(200, { "content-type": "text/csv; charset=utf-8" });
+        res.writeHead(200, {
+          "content-type": "text/csv; charset=utf-8",
+          "access-control-allow-origin": "*",
+          "cache-control": "no-store",
+        });
         res.end(csv);
       } catch (err) {
         res.writeHead(500);

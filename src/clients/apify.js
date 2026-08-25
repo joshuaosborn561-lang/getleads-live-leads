@@ -1,4 +1,4 @@
-import { hashedProfileId } from "../normalize.js";
+import { bandFromEmployeeCount, hashedProfileId } from "../normalize.js";
 import { withBackoff } from "../http.js";
 
 export function splitLinkedinInputs(urls) {
@@ -17,11 +17,21 @@ export function splitLinkedinInputs(urls) {
 export function mapApifyProfile(item) {
   const current = item?.currentPosition?.[0] || {};
   const present = (item?.experience || []).find((e) => e.endDate?.text === "Present") || {};
-  const company = current.companyName || present.companyName || null;
+  const companyObj = current.company || present.company || {};
+  const company = current.companyName || present.companyName || companyObj.name || null;
   const title = current.position || present.position || item?.headline || null;
   const location =
     item?.location?.linkedinText || item?.location?.parsed?.text || null;
-  const website = current.companyWebsite || present.companyWebsite || null;
+  const website =
+    current.companyWebsite ||
+    present.companyWebsite ||
+    companyObj.website ||
+    item?.companyWebsites?.[0]?.url ||
+    null;
+  const employees = bandFromEmployeeCount(
+    companyObj.employeeCount ?? item?.employeeCount,
+    companyObj.employeeCountRange ?? item?.employeeCountRange,
+  );
   const query = item?.originalQuery?.url || item?.originalQuery?.query || item?.linkedinUrl || null;
   return {
     query,
@@ -32,6 +42,7 @@ export function mapApifyProfile(item) {
     title,
     location,
     website,
+    employees,
     headline: item?.headline || null,
     city: item?.location?.parsed?.city || null,
     country: item?.location?.parsed?.country || null,

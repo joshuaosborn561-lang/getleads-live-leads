@@ -1,4 +1,4 @@
-import { sizeBandStatus } from "./normalize.js";
+import { cleanSizeBand, sizeBandStatus } from "./normalize.js";
 import { applyResolvedFields, resolveCompanies, resolveEmails } from "./resolve.js";
 import { markByDedupeKeys, fetchByStatus } from "./inbox.js";
 import { loadSpend } from "./spend.js";
@@ -8,7 +8,7 @@ import { emailDomain, normalizeEmail } from "./util/email.js";
 export function nextParkedStatus(row, lead) {
   const email = lead.engagerEmail || row.engager_email;
   const company = lead.engagerCompany || row.engager_company;
-  const band = lead.engagerEmployees || row.engager_employees;
+  const band = cleanSizeBand(lead.engagerEmployees || row.engager_employees);
   const campaignId = row.campaign_id;
   return sizeBandStatus(band, company, email, campaignId);
 }
@@ -16,6 +16,11 @@ export function nextParkedStatus(row, lead) {
 export async function runParkedResolution({ supabase, config, apify, waterfall, log }) {
   const rows = await fetchByStatus(supabase, ["needs_email", "needs_company_data"], {
     limit: config.enrichmentBatchLimit,
+    orders: [
+      ["resolution_attempts", { ascending: true }],
+      ["last_resolution_at", { ascending: true, nullsFirst: true }],
+      ["id", { ascending: true }],
+    ],
   });
   const stats = { claimed: rows.length, updated: 0, unresolvable: 0, error: 0, cap_hit: false };
   if (!rows.length) return stats;

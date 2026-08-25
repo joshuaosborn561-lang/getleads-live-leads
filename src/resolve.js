@@ -1,11 +1,11 @@
 import { chunk } from "./clients/webhook.js";
 import { applyEmploymentCurrency } from "./gates/prospect.js";
-import { domainFromWebsite, linkedinSlug, normCompany, normFirstName } from "./normalize.js";
+import { cleanSizeBand, domainFromWebsite, linkedinSlug, normCompany, normFirstName } from "./normalize.js";
 import { addSpend, wouldExceedCap } from "./spend.js";
 import { emailDomain, normalizeEmail } from "./util/email.js";
 
 export function needsCompany(lead) {
-  return !String(lead.engagerCompany || "").trim();
+  return !String(lead.engagerCompany || "").trim() || !cleanSizeBand(lead.engagerEmployees);
 }
 
 export function needsEmail(lead) {
@@ -91,17 +91,20 @@ export async function resolveCompanies({ leads, apify, config, spend, supabase, 
       });
       for (const lead of part) {
         const item = matchApifyItem(lead, result.items);
-        if (!item?.company) continue;
-        const currency = applyEmploymentCurrency(lead, item.company);
-        lead.engagerCompany = currency.company;
-        lead.employmentMismatch = currency.mismatch;
-        lead.companySource = currency.source;
+        if (!item?.company && !item?.employees) continue;
+        if (item.company) {
+          const currency = applyEmploymentCurrency(lead, item.company);
+          lead.engagerCompany = currency.company;
+          lead.employmentMismatch = currency.mismatch;
+          lead.companySource = currency.source;
+        }
+        if (item.employees) lead.engagerEmployees = item.employees;
         if (item.title) lead.engagerJobTitle = item.title;
         if (item.city) lead.engagerCity = item.city;
         if (item.country) lead.engagerCountry = item.country;
         if (item.website) lead.engagerCompanyWebsite = item.website;
         lead.companyDomain = domainFromWebsite(item.website) || lead.companyDomain;
-        stats.resolved += 1;
+        if (item.company || item.employees) stats.resolved += 1;
       }
     } catch (err) {
       stats.errors += part.length;

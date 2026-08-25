@@ -69,9 +69,55 @@ export function domainFromWebsite(value) {
   }
 }
 
+const EMPTY_BANDS = new Set(["", "—", "–", "-", "unknown", "n/a", "na", "none", "null"]);
+
+export function cleanSizeBand(value) {
+  if (value == null) return null;
+  const s = String(value).trim();
+  if (!s || EMPTY_BANDS.has(s) || EMPTY_BANDS.has(s.toLowerCase())) return null;
+  return s;
+}
+
+export function countToSizeBand(count) {
+  const n = Number(count);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  if (n <= 10) return "1 to 10";
+  if (n <= 50) return "11 to 50";
+  if (n <= 200) return "51 to 200";
+  if (n <= 500) return "201 to 500";
+  if (n <= 1000) return "501 to 1000";
+  if (n <= 5000) return "1001 to 5000";
+  if (n <= 10000) return "5001 to 10000";
+  return "10001+";
+}
+
+export function rangeToSizeBand(range) {
+  if (!range || typeof range !== "object") return null;
+  const start = Number(range.start);
+  if (!Number.isFinite(start) || start <= 0) return null;
+  const end = range.end == null || range.end === "" ? null : Number(range.end);
+  const key = `${start}-${Number.isFinite(end) ? end : "plus"}`;
+  const mapped = {
+    "1-10": "1 to 10",
+    "11-50": "11 to 50",
+    "51-200": "51 to 200",
+    "201-500": "201 to 500",
+    "501-1000": "501 to 1000",
+    "1001-5000": "1001 to 5000",
+    "5001-10000": "5001 to 10000",
+    "10001-plus": "10001+",
+  };
+  return mapped[key] || countToSizeBand(start);
+}
+
+export function bandFromEmployeeCount(count, range) {
+  return rangeToSizeBand(range) || countToSizeBand(count);
+}
+
 export function sizeBandStatus(band, company, email, campaignId) {
-  if (band && (SIZE_DQ_SET.has(band) || !SIZE_OK_SET.has(band))) return "dq_size";
-  if (!band || !company) return "needs_company_data";
+  const cleaned = cleanSizeBand(band);
+  if (cleaned && (SIZE_DQ_SET.has(cleaned) || !SIZE_OK_SET.has(cleaned))) return "dq_size";
+  if (!cleaned || !company) return "needs_company_data";
   if (!email) return "needs_email";
   if (!campaignId) return "pending_campaign";
   return "pending_verification";

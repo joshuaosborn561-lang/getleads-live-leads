@@ -4,9 +4,18 @@ import { newerThanHwm, normalizeLead } from "../src/clients/getleads.js";
 // cleanEmployees is covered via normalizeLead
 import { toWebhookLead } from "../src/clients/webhook.js";
 import { applyEmploymentCurrency, applyProspectGates, histogramBucket, isNoiseTitle } from "../src/gates/prospect.js";
-import { companiesMatch, hashedProfileId, normCompany, normFirstName, sizeBandStatus } from "../src/normalize.js";
+import {
+  bandFromEmployeeCount,
+  companiesMatch,
+  hashedProfileId,
+  normCompany,
+  normFirstName,
+  sizeBandStatus,
+} from "../src/normalize.js";
 import { filterNewLeads } from "../src/pull.js";
-import { companyDomainOf, needsCompany } from "../src/resolve.js";
+import { companyDomainOf, needsCompany, resolveCompanies } from "../src/resolve.js";
+import { mapApifyProfile } from "../src/clients/apify.js";
+import { nextParkedStatus } from "../src/parked.js";
 
 function lead(overrides = {}) {
   return {
@@ -75,6 +84,14 @@ describe("normalize + size", () => {
     assert.equal(sizeBandStatus("1 to 10", "Acme", "a@x.com", 1), "dq_size");
     assert.equal(sizeBandStatus("11 to 50", "Acme", null, 1), "needs_email");
     assert.equal(sizeBandStatus(null, null, null, 1), "needs_company_data");
+    assert.equal(sizeBandStatus("—", "Acme", "a@x.com", 1), "needs_company_data");
+  });
+
+  it("maps HarvestAPI employee ranges onto hook size bands", () => {
+    assert.equal(bandFromEmployeeCount(42, { start: 11, end: 50 }), "11 to 50");
+    assert.equal(bandFromEmployeeCount(16985, { start: 10001, end: null }), "10001+");
+    assert.equal(bandFromEmployeeCount(7, null), "1 to 10");
+    assert.equal(bandFromEmployeeCount(null, null), null);
   });
 
   it("splits hashed LinkedIn ids", () => {
@@ -124,9 +141,99 @@ describe("pull cursor + webhook map", () => {
     assert.ok(mapped.authorLinkedinUrl);
   });
 
-  it("requires a domain before email resolution", () => {
+  it("requires a domain before email resolution and scrapes when size is missing", () => {
     assert.equal(needsCompany({ engagerCompany: "" }), true);
+    assert.equal(needsCompany({ engagerCompany: "Acme", engagerEmployees: "—" }), true);
+    assert.equal(needsCompany({ engagerCompany: "Acme", engagerEmployees: "11 to 50" }), false);
     assert.equal(companyDomainOf({ engagerCompanyWebsite: "https://www.acme.com/about" }), "acme.com");
     assert.equal(companyDomainOf({ engagerEmail: "pat@gmail.com", engagerCompany: "Acme" }), "");
+  });
+
+  it("reads company size and website from the nested HarvestAPI company object", () => {
+    const mapped = mapApifyProfile({
+      linkedinUrl: "https://www.linkedin.com/in/pat-lee",
+      currentPosition: [
+        {
+          companyName: "Acme Inc",
+          position: "VP Sales",
+          company: {
+            name: "Acme Inc",
+            website: "https://www.acme.com",
+            employeeCount: 42,
+            employeeCountRange: { start: 11, end: 50 },
+          },
+        },
+      ],
+    });
+    assert.equal(mapped.company, "Acme Inc");
+    assert.equal(mapped.employees, "11 to 50");
+    assert.equal(mapped.website, "https://www.acme.com");
+    assert.equal(mapped.title, "VP Sales");
+  });
+
+  it("calls Apify when a company name exists but the size band does not", async () => {
+    const calls = [];
+    const result = await resolveCompanies({
+      leads: [
+        {
+          dedupeKey: "x",
+          engagerCompany: "Acme",
+          engagerEmployees: null,
+          engagerLinkedinUrl: "https://www.linkedin.com/in/pat-lee",
+        },
+      ],
+      apify: {
+        async scrapeProfiles(urls) {
+          calls.push(urls.length);
+          return {
+            items: [
+              {
+                linkedinUrl: "https://www.linkedin.com/in/pat-lee",
+                company: "Acme",
+                employees: "11 to 50",
+                website: "https://acme.com",
+              },
+            ],
+            usageTotalUsd: 0.004,
+            runId: "run1",
+          };
+        },
+      },
+      config: { apifyToken: "t", apifyBatchSize: 50, apifyCentsPerProfile: 0.4 },
+      spend: { spendCents: 0 },
+      supabase: {
+        async rpc(name, args) {
+          if (name === "sg_pipeline_add_spend") {
+            return {
+              data: { month_key: "2026-08", apify_cents: args.p_cents, waterfall_cents: 0, verifier_cents: 0 },
+              error: null,
+            };
+          }
+          return { data: { month_key: "2026-08", apify_cents: 0, waterfall_cents: 0, verifier_cents: 0 }, error: null };
+        },
+      },
+      log: { info() {}, warn() {} },
+      cap: 500,
+    });
+    assert.equal(calls[0], 1);
+    assert.equal(result.leads[0].engagerEmployees, "11 to 50");
+    assert.equal(result.stats.resolved, 1);
+  });
+
+  it("re-gates parked placeholder bands as missing size, not dq_size", () => {
+    assert.equal(
+      nextParkedStatus(
+        { engager_company: "Acme", engager_employees: "—", engager_email: "a@x.com", campaign_id: 1 },
+        {},
+      ),
+      "needs_company_data",
+    );
+    assert.equal(
+      nextParkedStatus(
+        { engager_company: "Acme", engager_email: "a@x.com", campaign_id: 1 },
+        { engagerEmployees: "11 to 50" },
+      ),
+      "pending_verification",
+    );
   });
 });
