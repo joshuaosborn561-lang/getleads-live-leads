@@ -10,23 +10,31 @@ import {
   normFirstName,
 } from "./normalize.js";
 import { addSpend, wouldExceedCap } from "./spend.js";
-import { emailDomain, normalizeEmail } from "./util/email.js";
+import { emailDomain, isEmail } from "./util/email.js";
 
 export function needsCompany(lead) {
   return !String(lead.engagerCompany || "").trim() || !cleanSizeBand(lead.engagerEmployees);
 }
 
 export function needsEmail(lead) {
-  return !normalizeEmail(lead.engagerEmail);
+  return !isEmail(lead.engagerEmail);
 }
 
 export function companyDomainOf(lead) {
   if (lead.companyDomain) return lead.companyDomain;
   const fromSite = domainFromWebsite(lead.engagerCompanyWebsite);
   if (fromSite) return fromSite;
-  const fromEmail = emailDomain(normalizeEmail(lead.engagerEmail));
+  const fromEmail = isEmail(lead.engagerEmail) ? emailDomain(lead.engagerEmail) : "";
   if (fromEmail && !isFreemail(fromEmail)) return fromEmail;
   return "";
+}
+
+export function shouldWaterfall(lead) {
+  const hasPerson =
+    Boolean(lead.engagerLinkedinUrl) ||
+    Boolean(lead.engagerFirstName || lead.engagerFullName);
+  if (!hasPerson) return false;
+  return needsEmail(lead) || needsCompany(lead) || !companyDomainOf(lead);
 }
 
 const FREEMAIL = new Set([
@@ -103,9 +111,12 @@ export function applyProfileItem(lead, item) {
 }
 
 export async function resolveCompanies({ leads, apify, config, spend, supabase, log, cap }) {
-  const stats = { attempted: 0, resolved: 0, skipped_cap: 0, errors: 0, spend_cents: 0 };
+  const stats = { attempted: 0, resolved: 0, skipped_cap: 0, skipped_aiark: 0, errors: 0, spend_cents: 0 };
   const out = leads.map((l) => ({ ...l }));
-  const missing = out.filter((l) => needsCompany(l) && l.engagerLinkedinUrl);
+  // AI Ark (via waterfall + person LinkedIn URL) owns company/domain lookup now.
+  // Keep any domain Apify already stored; do not scrape those people again.
+  stats.skipped_aiark = out.filter((l) => l.engagerLinkedinUrl && (needsCompany(l) || !companyDomainOf(l))).length;
+  const missing = out.filter((l) => needsCompany(l) && !l.engagerLinkedinUrl);
   if (!missing.length) return { leads: out, stats, spend };
   if (!config.apifyToken && !apify?.scrapeProfiles) return { leads: out, stats, spend };
   if (!config.apifyToken) {
@@ -172,7 +183,9 @@ export async function resolveCompanies({ leads, apify, config, spend, supabase, 
 
 export async function resolveCompanySizes({ leads, apify, config, spend, supabase, log, cap, stats }) {
   let current = spend;
-  const need = leads.filter((l) => !cleanSizeBand(l.engagerEmployees) && l.companyLinkedinUrl);
+  const need = leads.filter(
+    (l) => !cleanSizeBand(l.engagerEmployees) && l.companyLinkedinUrl && !l.engagerLinkedinUrl,
+  );
   if (!need.length) return current;
   const urls = [...new Set(need.map((l) => l.companyLinkedinUrl).filter(Boolean))];
   const estimate = urls.length * config.apifyCentsPerProfile;
@@ -224,10 +237,59 @@ export async function resolveCompanySizes({ leads, apify, config, spend, supabas
   return current;
 }
 
+export function waterfallRowOf(lead) {
+  return {
+    domain: companyDomainOf(lead) || undefined,
+    company_name: lead.engagerCompany || undefined,
+    first_name: lead.engagerFirstName || String(lead.engagerFullName || "").split(/\s+/)[0] || undefined,
+    last_name: lead.engagerLastName || undefined,
+    title: lead.engagerJobTitle || undefined,
+    linkedin_url: lead.engagerLinkedinUrl || undefined,
+  };
+}
+
+export function applyWaterfallHit(lead, hit) {
+  if (!hit) return false;
+  let changed = false;
+  if (isEmail(hit.email)) {
+    lead.engagerEmail = hit.email;
+    lead.emailSource = hit.source_tier || "waterfall";
+    changed = true;
+    const domain = emailDomain(hit.email);
+    if (domain && !isFreemail(domain) && !lead.companyDomain && !domainFromWebsite(lead.engagerCompanyWebsite)) {
+      lead.companyDomain = domain;
+      lead.companySource = lead.companySource || "aiark";
+    }
+  }
+  if (hit.domain && !companyDomainOf(lead) && !isFreemail(hit.domain)) {
+    lead.companyDomain = String(hit.domain).toLowerCase();
+    lead.companySource = lead.companySource || "aiark";
+    changed = true;
+  }
+  if (hit.company_name && !String(lead.engagerCompany || "").trim()) {
+    lead.engagerCompany = hit.company_name;
+    lead.companySource = lead.companySource || "aiark";
+    changed = true;
+  }
+  if (hit.employee_range && !cleanSizeBand(lead.engagerEmployees)) {
+    lead.engagerEmployees = cleanSizeBand(hit.employee_range) || hit.employee_range;
+    changed = true;
+  }
+  return changed;
+}
+
 export async function resolveEmails({ leads, waterfall, config, spend, supabase, log, cap }) {
-  const stats = { attempted: 0, resolved: 0, skipped_cap: 0, skipped_no_domain: 0, errors: 0, spend_cents: 0, job_id: null };
+  const stats = {
+    attempted: 0,
+    resolved: 0,
+    skipped_cap: 0,
+    skipped_no_domain: 0,
+    errors: 0,
+    spend_cents: 0,
+    job_id: null,
+  };
   const out = leads.map((l) => ({ ...l }));
-  const missing = out.filter((l) => !needsCompany(l) && needsEmail(l) && (l.engagerFirstName || l.engagerFullName));
+  const missing = out.filter(shouldWaterfall);
   if (!missing.length) return { leads: out, stats, spend };
 
   let current = spend;
@@ -235,18 +297,12 @@ export async function resolveEmails({ leads, waterfall, config, spend, supabase,
   const indexed = [];
   for (const lead of missing) {
     const domain = companyDomainOf(lead);
-    if (!domain) {
+    const linkedin = lead.engagerLinkedinUrl || "";
+    if (!domain && !linkedin) {
       stats.skipped_no_domain += 1;
       continue;
     }
-    rows.push({
-      domain,
-      company_name: lead.engagerCompany,
-      first_name: lead.engagerFirstName || String(lead.engagerFullName || "").split(/\s+/)[0] || null,
-      last_name: lead.engagerLastName || null,
-      title: lead.engagerJobTitle || null,
-      linkedin_url: lead.engagerLinkedinUrl || null,
-    });
+    rows.push(waterfallRowOf(lead));
     indexed.push(lead);
   }
   if (!rows.length) return { leads: out, stats, spend: current };
@@ -273,24 +329,30 @@ export async function resolveEmails({ leads, waterfall, config, spend, supabase,
     stats.job_id = jobId;
     if (jobId) await waterfall.waitForJob(jobId);
     const contacts = await readWaterfallContacts(supabase, config.waterfallClientTag, rows);
+    const companies = await readWaterfallCompanies(supabase, config.waterfallClientTag, contacts, rows);
     const cents = Number(started?.cost_cents || started?.spend_cents || 0) || estimate;
     current = await addSpend(supabase, "waterfall", cents);
     stats.spend_cents += cents;
-    log.info("waterfall job complete", { job_id: jobId, count: rows.length, matched: contacts.length, spend_cents: cents });
+    log.info("waterfall job complete", {
+      job_id: jobId,
+      count: rows.length,
+      matched: contacts.length,
+      spend_cents: cents,
+    });
     const byKey = indexContacts(contacts);
+    const byDomain = indexCompanies(companies);
     for (const lead of indexed) {
       const domain = companyDomainOf(lead);
       const first = (lead.engagerFirstName || "").toLowerCase();
       const last = (lead.engagerLastName || "").toLowerCase();
+      const li = contactLookupKeys(lead);
       const hit =
+        li.map((key) => byKey.get(key)).find(Boolean) ||
         byKey.get(`${domain}|${first}|${last}`) ||
         byKey.get(`${domain}|${first}|`) ||
         null;
-      if (hit?.email) {
-        lead.engagerEmail = hit.email;
-        lead.emailSource = hit.source_tier || "waterfall";
-        stats.resolved += 1;
-      }
+      const company = byDomain.get(domain) || byDomain.get(hit?.domain || "") || null;
+      if (applyWaterfallHit(lead, hit ? { ...hit, ...company } : company)) stats.resolved += 1;
     }
   } catch (err) {
     stats.errors += rows.length;
@@ -306,10 +368,60 @@ export async function resolveEmails({ leads, waterfall, config, spend, supabase,
 export async function readWaterfallContacts(supabase, clientTag, rows) {
   const table = `${clientTag}_wf_contacts`;
   const domains = [...new Set(rows.map((r) => r.domain).filter(Boolean))];
+  const urls = [...new Set(rows.map((r) => r.linkedin_url).filter(Boolean))];
+  const seen = new Set();
+  const out = [];
+  const add = (batch) => {
+    for (const row of batch || []) {
+      if (!row?.email && !row?.linkedin_url) continue;
+      const key = `${row.domain || ""}|${row.email || ""}|${row.linkedin_url || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(row);
+    }
+  };
+  if (domains.length) {
+    const { data, error } = await supabase
+      .from(table)
+      .select("domain, first_name, last_name, email, source_tier, linkedin_url")
+      .in("domain", domains);
+    if (error) throw new Error(`waterfall contacts: ${error.message}`);
+    add(data);
+  }
+  if (urls.length) {
+    const { data, error } = await supabase
+      .from(table)
+      .select("domain, first_name, last_name, email, source_tier, linkedin_url")
+      .in("linkedin_url", urls);
+    if (error) throw new Error(`waterfall contacts: ${error.message}`);
+    add(data);
+  }
+  return out.filter((r) => isEmail(r.email) || r.linkedin_url);
+}
+
+export async function readWaterfallCompanies(supabase, clientTag, contacts, rows) {
+  const table = `${clientTag}_wf_companies`;
+  const domains = [
+    ...new Set(
+      [...(contacts || []), ...(rows || [])]
+        .map((r) => r.domain)
+        .filter(Boolean)
+        .map((d) => String(d).toLowerCase()),
+    ),
+  ];
   if (!domains.length) return [];
-  const { data, error } = await supabase.from(table).select("domain, first_name, last_name, email, source_tier").in("domain", domains);
-  if (error) throw new Error(`waterfall contacts: ${error.message}`);
-  return (data || []).filter((r) => r.email);
+  const { data, error } = await supabase
+    .from(table)
+    .select("domain, company_name, employee_range, website")
+    .in("domain", domains);
+  if (error) throw new Error(`waterfall companies: ${error.message}`);
+  return data || [];
+}
+
+function contactLookupKeys(lead) {
+  const slug = linkedinSlug(lead.engagerLinkedinUrl);
+  const hash = hashedProfileId(lead.engagerLinkedinUrl);
+  return [`li:${slug}`, `li:${hash}`].filter((key) => key.length > 3);
 }
 
 function indexContacts(contacts) {
@@ -320,6 +432,19 @@ function indexContacts(contacts) {
     const last = String(row.last_name || "").toLowerCase();
     if (domain && first && last) map.set(`${domain}|${first}|${last}`, row);
     if (domain && first) map.set(`${domain}|${first}|`, row);
+    const slug = linkedinSlug(row.linkedin_url);
+    const hash = hashedProfileId(row.linkedin_url);
+    if (slug) map.set(`li:${slug}`, row);
+    if (hash) map.set(`li:${hash}`, row);
+  }
+  return map;
+}
+
+function indexCompanies(companies) {
+  const map = new Map();
+  for (const row of companies || []) {
+    const domain = String(row.domain || "").toLowerCase();
+    if (domain) map.set(domain, row);
   }
   return map;
 }

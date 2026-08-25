@@ -1,9 +1,9 @@
-import { normalizeEmail } from "../util/email.js";
+import { isEmail, normalizeEmail } from "../util/email.js";
 
 export function applyInboxDedupe(rows, existing = []) {
   const firstIdByEmail = new Map();
   for (const row of existing) {
-    const email = normalizeEmail(row.engager_email);
+    const email = isEmail(row.engager_email) ? normalizeEmail(row.engager_email) : "";
     if (!email) continue;
     const id = Number(row.id);
     const prev = firstIdByEmail.get(email);
@@ -16,7 +16,7 @@ export function applyInboxDedupe(rows, existing = []) {
 
   const ordered = [...rows].sort((a, b) => Number(a.id) - Number(b.id));
   for (const row of ordered) {
-    const email = normalizeEmail(row.engager_email);
+    const email = isEmail(row.engager_email) ? normalizeEmail(row.engager_email) : "";
     if (!email) {
       remaining.push(row);
       continue;
@@ -41,7 +41,7 @@ export async function applySmartleadDedupe(rows, smartlead) {
   const remaining = [];
   for (const row of rows) {
     const campaignId = row.campaign_id;
-    const email = normalizeEmail(row.engager_email);
+    const email = isEmail(row.engager_email) ? normalizeEmail(row.engager_email) : "";
     if (!campaignId || !email) {
       remaining.push(row);
       continue;

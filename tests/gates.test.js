@@ -63,6 +63,18 @@ describe("inbox dedupe", () => {
     assert.equal(remaining.length, 1);
     assert.equal(remaining[0].dedupe_key, "c");
   });
+
+  it("does not treat a junk one-character email as a duplicate key", () => {
+    const { duplicates, remaining } = applyInboxDedupe(
+      [
+        row({ id: 10, dedupe_key: "a", engager_email: "x" }),
+        row({ id: 11, dedupe_key: "b", engager_email: "x" }),
+      ],
+      [{ id: 1, engager_email: "x" }],
+    );
+    assert.equal(duplicates.length, 0);
+    assert.equal(remaining.length, 2);
+  });
 });
 
 describe("verifier mapping", () => {
