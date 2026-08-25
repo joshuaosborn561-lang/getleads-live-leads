@@ -251,7 +251,7 @@ describe("spend + location + logs + backoff", () => {
                 uploads.push({
                   bucket,
                   path,
-                  bytes: Buffer.isBuffer(body) ? body.length : 0,
+                  bytes: Buffer.isBuffer(body) ? body.length : String(body || "").length,
                   type: opts.contentType,
                 });
                 return { error: null };
