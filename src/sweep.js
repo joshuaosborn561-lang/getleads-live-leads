@@ -72,7 +72,9 @@ export async function runSweep({ supabase, config, verifier, smartlead, log, fet
       duplicates: slDupes,
       remaining: afterSl,
       errors: slErrors,
-    } = await applySmartleadDedupe(afterInbox, smartlead);
+    } = await applySmartleadDedupe(afterInbox, smartlead, {
+      concurrency: config.smartleadConcurrency,
+    });
     await applyPatches(supabase, slDupes);
     counts.duplicate += slDupes.length;
     if (slErrors.length) {
