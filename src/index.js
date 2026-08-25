@@ -1,22 +1,46 @@
 import http from "node:http";
 import { pathToFileURL } from "node:url";
+import { createApify } from "./clients/apify.js";
+import { createGetleads } from "./clients/getleads.js";
+import { createSmartlead } from "./clients/smartlead.js";
+import { createVerifier } from "./clients/verifier.js";
+import { createWaterfall } from "./clients/waterfall.js";
+import { createWebhook } from "./clients/webhook.js";
 import { assertRuntimeConfig, loadConfig } from "./config.js";
 import { createLogger } from "./logger.js";
-import { createMillionVerifier } from "./clients/millionverifier.js";
-import { createNo2Bounce } from "./clients/no2bounce.js";
-import { createSmartlead } from "./clients/smartlead.js";
-import { bootstrapSchema } from "./inbox.js";
+import { bootstrapSchema, countsByStatus, getFeed, loadFirstRunReport, loadHwm } from "./inbox.js";
+import { runParkedResolution } from "./parked.js";
+import { emptyPullCounts, runPull } from "./pull.js";
+import { loadSpend } from "./spend.js";
 import { createSupabase } from "./supabase.js";
 import { emptyCounts, runSweep } from "./sweep.js";
 
-const log = createLogger();
+const log = createLogger("sg-engager-pipeline");
 
-function startHealthServer(port, getState) {
-  const server = http.createServer((req, res) => {
-    if (req.url === "/health" || req.url === "/") {
-      const body = JSON.stringify({ ok: true, ...getState() });
+function startServer(port, { getState, getFeedCsv }) {
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, `http://127.0.0.1:${port}`);
+    if (url.pathname === "/health" || url.pathname === "/") {
+      const body = JSON.stringify({ ok: true, service: "sg-engager-pipeline", ...getState() });
       res.writeHead(200, { "content-type": "application/json" });
       res.end(body);
+      return;
+    }
+    const feed = url.pathname.match(/^\/feeds\/([A-Za-z0-9._-]+)\.csv$/);
+    if (feed) {
+      try {
+        const csv = await getFeedCsv(feed[1]);
+        if (!csv) {
+          res.writeHead(404);
+          res.end("not found");
+          return;
+        }
+        res.writeHead(200, { "content-type": "text/csv; charset=utf-8" });
+        res.end(csv);
+      } catch (err) {
+        res.writeHead(500);
+        res.end(String(err.message || "error"));
+      }
       return;
     }
     res.writeHead(404);
@@ -33,59 +57,127 @@ export async function main(env = process.env, argv = process.argv) {
   assertRuntimeConfig(config);
 
   const state = {
+    last_pull: null,
     last_sweep: null,
-    last_counts: emptyCounts(),
-    running: false,
+    last_pull_counts: emptyPullCounts(),
+    last_sweep_counts: emptyCounts(),
+    pull_running: false,
+    sweep_running: false,
+    status_counts: {},
+    spend: null,
+    profiles: [],
+    first_run: null,
   };
-  const server = startHealthServer(config.port, () => ({
-    last_sweep: state.last_sweep,
-    last_counts: state.last_counts,
-    running: state.running,
-  }));
 
   const supabase = createSupabase(config);
+
+  const server = startServer(config.port, {
+    getState: () => ({
+      last_pull: state.last_pull,
+      last_sweep: state.last_sweep,
+      last_pull_counts: state.last_pull_counts,
+      last_sweep_counts: state.last_sweep_counts,
+      pull_running: state.pull_running,
+      sweep_running: state.sweep_running,
+      status_counts: state.status_counts,
+      spend: state.spend,
+      profiles: state.profiles,
+      first_run: state.first_run,
+    }),
+    getFeedCsv: (id) => getFeed(supabase, id),
+  });
+
   await bootstrapSchema(supabase);
 
   const deps = {
     supabase,
     config,
-    mv: createMillionVerifier(config),
-    n2b: createNo2Bounce(config),
+    getleads: createGetleads(config),
+    apify: createApify(config),
+    waterfall: createWaterfall(config),
+    verifier: createVerifier(config),
+    webhook: createWebhook(config),
     smartlead: createSmartlead(config),
     log,
   };
 
-  async function tick() {
-    if (state.running) {
-      log.warn("sweep already running; skipping overlapping tick");
-      return state.last_counts;
+  async function refreshHealth() {
+    try {
+      state.status_counts = await countsByStatus(supabase);
+      state.spend = await loadSpend(supabase);
+      state.profiles = await loadHwm(supabase);
+      const first = await loadFirstRunReport(supabase);
+      state.first_run = first?.report || null;
+    } catch (err) {
+      log.warn("health refresh failed", { error: err.message });
     }
-    state.running = true;
+  }
+
+  async function pullTick() {
+    if (state.pull_running) {
+      log.warn("pull already running; skipping overlapping tick");
+      return state.last_pull_counts;
+    }
+    state.pull_running = true;
+    try {
+      const counts = await runPull(deps);
+      await runParkedResolution(deps);
+      state.last_pull_counts = counts;
+      state.last_pull = new Date().toISOString();
+      await refreshHealth();
+      return counts;
+    } catch (err) {
+      log.error("pull failed", { error: err.message });
+      throw err;
+    } finally {
+      state.pull_running = false;
+    }
+  }
+
+  async function sweepTick() {
+    if (state.sweep_running) {
+      log.warn("sweep already running; skipping overlapping tick");
+      return state.last_sweep_counts;
+    }
+    state.sweep_running = true;
     try {
       const counts = await runSweep(deps);
-      state.last_counts = counts;
+      state.last_sweep_counts = counts;
       state.last_sweep = new Date().toISOString();
+      await refreshHealth();
       return counts;
     } catch (err) {
       log.error("sweep failed", { error: err.message });
       throw err;
     } finally {
-      state.running = false;
+      state.sweep_running = false;
     }
   }
 
-  await tick();
+  await refreshHealth();
+
+  if (!config.verifyOnly) await pullTick();
+  if (!config.pullOnly) await sweepTick();
+
   if (config.once) {
     server.close();
-    return state.last_counts;
+    return { pull: state.last_pull_counts, sweep: state.last_sweep_counts };
   }
 
-  const intervalMs = config.sweepIntervalMinutes * 60_000;
   setInterval(() => {
-    tick().catch(() => {});
-  }, intervalMs);
-  log.info("worker loop started", { sweep_interval_minutes: config.sweepIntervalMinutes });
-  return { server, tick };
+    pullTick().catch(() => {});
+  }, config.runIntervalMinutes * 60_000);
+  setInterval(() => {
+    sweepTick().catch(() => {});
+  }, config.verifySweepIntervalMinutes * 60_000);
+
+  log.info("pipeline loops started", {
+    run_interval_minutes: config.runIntervalMinutes,
+    verify_sweep_interval_minutes: config.verifySweepIntervalMinutes,
+    enrichment_batch_limit: config.enrichmentBatchLimit,
+    monthly_spend_cap_cents: config.monthlySpendCapCents,
+  });
+  return { server, pullTick, sweepTick };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

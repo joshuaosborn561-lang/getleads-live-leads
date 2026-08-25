@@ -2,7 +2,7 @@ import { throwIfError } from "./supabase.js";
 import { TERMINAL_STATUSES } from "./config.js";
 
 export async function bootstrapSchema(supabase) {
-  const { error } = await supabase.rpc("sg_engager_bootstrap");
+  const { error } = await supabase.rpc("sg_pipeline_bootstrap");
   if (error) throw new Error(`bootstrap: ${error.message}`);
 }
 
@@ -41,15 +41,6 @@ export async function releaseToPending(supabase, keys) {
   );
 }
 
-export async function markError(supabase, keys, message) {
-  return markByDedupeKeys(
-    supabase,
-    keys,
-    { status: "error", routing_note: String(message || "error").slice(0, 500) },
-    ["verifying", "verified", "staged", "import_mismatch"],
-  );
-}
-
 export async function fetchByStatus(supabase, statuses, extraFilter = {}) {
   let q = supabase.from("sg_engager_inbox").select("*").in("status", statuses).order("id", { ascending: true });
   if (extraFilter.limit) q = q.limit(extraFilter.limit);
@@ -68,6 +59,95 @@ export async function fetchInboxByEmails(supabase, emails) {
   return data || [];
 }
 
+export async function countsByStatus(supabase) {
+  const { data, error } = await supabase.rpc("sg_pipeline_status_counts");
+  if (error) {
+    const fallback = await supabase.from("sg_engager_inbox").select("status");
+    throwIfError(fallback, "inbox counts");
+    const map = {};
+    for (const row of fallback.data || []) {
+      map[row.status || "unknown"] = (map[row.status || "unknown"] || 0) + 1;
+    }
+    return map;
+  }
+  const map = {};
+  for (const row of data || []) map[row.status] = Number(row.n || 0);
+  return map;
+}
+
+export async function loadHwm(supabase) {
+  const { data, error } = await supabase.from("sg_pipeline_hwm").select("*");
+  throwIfError({ error }, "hwm select");
+  return data || [];
+}
+
+export async function upsertHwm(supabase, rows) {
+  if (!rows?.length) return 0;
+  const { error } = await supabase.from("sg_pipeline_hwm").upsert(rows, { onConflict: "profile_id" });
+  throwIfError({ error }, "hwm upsert");
+  return rows.length;
+}
+
+export async function saveFirstRunReport(supabase, report) {
+  const { data: existing, error: readErr } = await supabase
+    .from("sg_pipeline_first_run")
+    .select("id")
+    .eq("id", 1)
+    .maybeSingle();
+  throwIfError({ error: readErr }, "first run read");
+  if (existing) return false;
+  const { error } = await supabase.from("sg_pipeline_first_run").insert({ id: 1, report });
+  if (error && /duplicate|unique/i.test(error.message)) return false;
+  throwIfError({ error }, "first run insert");
+  return true;
+}
+
+export async function loadFirstRunReport(supabase) {
+  const { data, error } = await supabase.from("sg_pipeline_first_run").select("report, created_at").eq("id", 1).maybeSingle();
+  throwIfError({ error }, "first run load");
+  return data || null;
+}
+
+export async function putFeed(supabase, id, csv) {
+  const { error } = await supabase.from("sg_pipeline_feeds").upsert({ id, csv }, { onConflict: "id" });
+  throwIfError({ error }, "feed upsert");
+}
+
+export async function getFeed(supabase, id) {
+  const { data, error } = await supabase.from("sg_pipeline_feeds").select("csv").eq("id", id).maybeSingle();
+  throwIfError({ error }, "feed get");
+  return data?.csv || null;
+}
+
 export function isTerminal(status) {
   return TERMINAL_STATUSES.includes(status);
+}
+
+export function inboxToLead(row) {
+  return {
+    dedupeKey: row.dedupe_key,
+    leadId: row.lead_id,
+    profileId: row.profile_id,
+    authorLinkedinUrl: row.author_linkedin_url,
+    authorDisplayName: row.author_display_name,
+    engagementType: row.engagement_type,
+    engagementDate: row.engagement_date,
+    engagerFirstName: row.engager_first_name,
+    engagerLastName: row.engager_last_name,
+    engagerFullName: row.engager_full_name,
+    engagerLinkedinUrl: row.engager_linkedin_url,
+    engagerEmail: row.engager_email,
+    engagerCompany: row.engager_company,
+    engagerEmployees: row.engager_employees,
+    engagerCity: row.engager_city,
+    engagerCountry: row.engager_country,
+    engagerSeniority: row.engager_seniority,
+    engagerFunction: row.engager_function,
+    engagerJobTitle: row.engager_job_title,
+    engagerCompanyWebsite: row.company_domain ? `https://${row.company_domain}` : null,
+    enrichmentStatus: row.enrichment_status,
+    campaignId: row.campaign_id,
+    status: row.status,
+    resolutionAttempts: row.resolution_attempts || 0,
+  };
 }

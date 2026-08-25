@@ -7,11 +7,12 @@ function createFake({ claimed = [], verified = [], staged = [], spend = 0 } = {}
   const store = {
     inbox,
     staging: [],
+    feeds: new Map(),
     suppression: [
       { domain: "trumethods.com", reason: "creator" },
       { domain: "crelate.com", reason: "competitor" },
     ],
-    spend,
+    spend: { month_key: "2026-08", apify_cents: 0, waterfall_cents: 0, verifier_cents: spend },
     patches: [],
   };
 
@@ -32,10 +33,10 @@ function createFake({ claimed = [], verified = [], staged = [], spend = 0 } = {}
           error: null,
         };
       }
-      if (name === "sg_engager_spend_state") return { data: { month_key: "2026-08", spend_cents: store.spend }, error: null };
-      if (name === "sg_engager_add_spend") {
-        store.spend += Number(args.p_cents || 0);
-        return { data: store.spend, error: null };
+      if (name === "sg_pipeline_spend_state") return { data: { ...store.spend }, error: null };
+      if (name === "sg_pipeline_add_spend") {
+        store.spend.verifier_cents += Number(args.p_cents || 0);
+        return { data: { ...store.spend }, error: null };
       }
       return { data: null, error: { message: `unknown rpc ${name}` } };
     },
@@ -48,6 +49,10 @@ function createFake({ claimed = [], verified = [], staged = [], spend = 0 } = {}
           this._in = { col, values };
           return this;
         },
+        eq(col, value) {
+          this._eq = { col, value };
+          return this;
+        },
         order() {
           return this;
         },
@@ -56,7 +61,8 @@ function createFake({ claimed = [], verified = [], staged = [], spend = 0 } = {}
           return this;
         },
         upsert(row) {
-          store.staging.push(row);
+          if (table === "sg_pipeline_feeds") store.feeds.set(row.id, row.csv);
+          else store.staging.push(row);
           return Promise.resolve({ error: null });
         },
         then(resolve) {
@@ -95,9 +101,9 @@ describe("runSweep", () => {
         mvCentsPerCredit: 0.178,
         n2bCentsPerCheck: 0.8,
         importChunkSize: 200,
+        publicBaseUrl: "https://pipeline.test",
       },
-      mv: {},
-      n2b: {},
+      verifier: {},
       smartlead: {},
       log: { info: (m, extra) => logs.push({ m, extra }), warn() {}, error() {} },
     });
@@ -107,7 +113,7 @@ describe("runSweep", () => {
     assert.equal(emptyCounts().claimed, 0);
   });
 
-  it("suppresses, verifies, stages, and imports without touching campaign state", async () => {
+  it("suppresses, verifies via MCP, stages, and imports without touching campaign state", async () => {
     const { supabase, store } = createFake({
       claimed: [
         {
@@ -140,13 +146,22 @@ describe("runSweep", () => {
         mvCentsPerCredit: 0.178,
         n2bCentsPerCheck: 0.8,
         importChunkSize: 200,
+        publicBaseUrl: "https://pipeline.test",
       },
-      mv: {
-        async upload() { return { fileId: "77" }; },
-        async poll() { return { status: "finished", credit: 1 }; },
-        async download() { return [{ inbox_id: "1", email: "ok@acme.com", result: "ok" }]; },
+      verifier: {
+        async start({ fileUrl }) {
+          assert.match(fileUrl, /\/feeds\/.+\.csv$/);
+          return { run_id: "22222222-2222-2222-2222-222222222222" };
+        },
+        async waitForRun() { return { status: "completed", mv_credits_used: 1, n2b_credits_used: 0 }; },
+        async results() {
+          return { downloads: { sendable_url: "https://files.test/s.csv", rejected_url: "https://files.test/r.csv" } };
+        },
       },
-      n2b: { async verifyMany() { return new Map(); } },
+      fetchImpl: async (url) => {
+        if (String(url).includes("s.csv")) return { text: async () => "Email\nok@acme.com\n" };
+        return { text: async () => "Email\n" };
+      },
       smartlead: {
         async campaignHasEmail() { return false; },
         async addLeads(id, list) {
@@ -156,6 +171,7 @@ describe("runSweep", () => {
       },
       log: { info() {}, warn() {}, error() {} },
     });
+
     assert.equal(counts.suppressed, 1);
     assert.equal(counts.verified, 1);
     assert.equal(counts.staged, 1);

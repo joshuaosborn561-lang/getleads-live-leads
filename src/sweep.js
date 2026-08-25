@@ -8,6 +8,7 @@ import {
   fetchByStatus,
   fetchInboxByEmails,
   markByDedupeKeys,
+  putFeed,
   reclaimStale,
   releaseToPending,
 } from "./inbox.js";
@@ -26,7 +27,7 @@ export function emptyCounts() {
     error: 0,
     released: 0,
     cap_hit: false,
-    mv_file_id: null,
+    run_id: null,
     spend_cents: 0,
   };
 }
@@ -46,7 +47,7 @@ export async function applyPatches(supabase, items) {
   return n;
 }
 
-export async function runSweep({ supabase, config, mv, n2b, smartlead, log }) {
+export async function runSweep({ supabase, config, verifier, smartlead, log, fetchImpl }) {
   const counts = emptyCounts();
 
   counts.reclaimed = await reclaimStale(supabase, config.staleVerifyingMinutes);
@@ -92,24 +93,26 @@ export async function runSweep({ supabase, config, mv, n2b, smartlead, log }) {
       if (capLogged) return;
       capLogged = true;
       counts.cap_hit = true;
-      log.warn("monthly spend cap hit; leaving remaining rows at pending_verification", info);
+      log.warn("monthly spend cap hit; leaving remaining rows parked", info);
     };
 
     const verified = await verifyRows({
       rows: afterSl,
       config,
       spendCents: spend.spendCents,
-      mv,
-      n2b,
+      verifier,
+      publicBaseUrl: config.publicBaseUrl,
+      putCsv: (id, csv) => putFeed(supabase, id, csv),
+      fetchImpl,
       onCapHit,
-      charge: (cents) => addSpend(supabase, cents),
+      charge: (vendor, cents) => addSpend(supabase, vendor, cents),
     });
     counts.verified += verified.stats.verified;
     counts.verified_bad += verified.stats.verified_bad;
     counts.error += verified.stats.error;
     counts.released += verified.stats.released;
     counts.cap_hit = counts.cap_hit || verified.stats.cap_hit;
-    counts.mv_file_id = verified.stats.mv_file_id;
+    counts.run_id = verified.stats.run_id;
     if (verified.releaseKeys?.length) {
       await releaseToPending(supabase, verified.releaseKeys);
     }

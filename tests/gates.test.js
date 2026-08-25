@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { extractUploadCount, formatLocation, toSmartleadLead } from "../src/clients/smartlead.js";
-import { classifyMv, classifyN2bStatus, estimateMvCents, verifyRows } from "../src/gates/verify.js";
+import { classifyFromSets, estimateVerifierCents, verifyRows } from "../src/gates/verify.js";
 import { applyInboxDedupe } from "../src/gates/dedupe.js";
 import { applySuppression } from "../src/gates/suppression.js";
 import { chunk, groupByCampaign, importStaged } from "../src/gates/import.js";
@@ -63,52 +63,49 @@ describe("inbox dedupe", () => {
   });
 });
 
-describe("verify mapping", () => {
-  it("maps mv and n2b outcomes", () => {
-    assert.equal(classifyMv("ok"), "verified");
-    assert.equal(classifyMv("invalid"), "verified_bad");
-    assert.equal(classifyMv("disposable"), "verified_bad");
-    assert.equal(classifyMv("catch_all"), "second_pass");
-    assert.equal(classifyMv("unknown"), "second_pass");
-    assert.equal(classifyN2bStatus("safe"), "verified");
-    assert.equal(classifyN2bStatus("invalid"), "verified_bad");
+describe("verifier mapping", () => {
+  it("classifies sendable vs rejected without logging addresses", () => {
+    assert.equal(classifyFromSets("pat@acme.com", new Set(["pat@acme.com"]), new Set()), "verified");
+    assert.equal(classifyFromSets("bad@acme.com", new Set(), new Set(["bad@acme.com"])), "verified_bad");
+    assert.equal(classifyFromSets("miss@acme.com", new Set(), new Set()), "unknown");
   });
 
-  it("stops before MillionVerifier when the cap would be exceeded", async () => {
+  it("stops before the verifier when the cap would be exceeded", async () => {
     const logs = [];
     const result = await verifyRows({
       rows: [row(), row({ id: 2, dedupe_key: "d2" })],
       config: { monthlySpendCapCents: 500, mvCentsPerCredit: 300, n2bCentsPerCheck: 0.8 },
       spendCents: 100,
-      mv: { upload() { throw new Error("should not upload"); } },
-      n2b: {},
+      verifier: { start() { throw new Error("should not start"); } },
+      putCsv() { throw new Error("should not write csv"); },
+      publicBaseUrl: "https://example.test",
       onCapHit: async (info) => logs.push(info),
       charge: async () => ({ spendCents: 100 }),
     });
     assert.equal(result.stats.cap_hit, true);
     assert.equal(result.releaseKeys.length, 2);
-    assert.equal(logs.length, 1);
-    assert.equal(logs[0].reason, "millionverifier");
+    assert.equal(logs[0].reason, "verifier");
     assert.ok(logs[0].would_cost_cents > 400);
   });
 
-  it("routes catch_all through No2Bounce and charges billed MV credits", async () => {
+  it("maps verifier CSVs and charges billed credits", async () => {
     const charges = [];
-    const mv = {
-      async upload() { return { fileId: "940" }; },
-      async poll() { return { status: "finished", credit: 1 }; },
-      async download() {
-        return [
-          { inbox_id: "1", email: "pat@acme.com", result: "ok" },
-          { inbox_id: "2", email: "ca@acme.com", result: "catch_all" },
-          { inbox_id: "3", email: "bad@acme.com", result: "invalid" },
-        ];
+    const feeds = new Map();
+    const verifier = {
+      async start() { return { run_id: "11111111-1111-1111-1111-111111111111" }; },
+      async waitForRun() { return { status: "completed", mv_credits_used: 2, n2b_credits_used: 1 }; },
+      async results() {
+        return {
+          downloads: {
+            sendable_url: "https://files.test/sendable.csv",
+            rejected_url: "https://files.test/rejected.csv",
+          },
+        };
       },
     };
-    const n2b = {
-      async verifyMany() {
-        return new Map([["ca@acme.com", { status: "safe" }]]);
-      },
+    const fetchImpl = async (url) => {
+      if (String(url).includes("sendable")) return { text: async () => "Email\npat@acme.com\nca@acme.com\n" };
+      return { text: async () => "Email\nbad@acme.com\n" };
     };
     const result = await verifyRows({
       rows: [
@@ -118,19 +115,21 @@ describe("verify mapping", () => {
       ],
       config: { monthlySpendCapCents: 500, mvCentsPerCredit: 0.178, n2bCentsPerCheck: 0.8 },
       spendCents: 0,
-      mv,
-      n2b,
+      verifier,
+      publicBaseUrl: "https://pipeline.test",
+      putCsv: async (id, csv) => feeds.set(id, csv),
+      fetchImpl,
       onCapHit: async () => {},
-      charge: async (cents) => {
+      charge: async (_vendor, cents) => {
         charges.push(cents);
-        return { spendCents: charges.reduce((a, b) => a + b, 0) };
+        return { spendCents: cents };
       },
     });
     const byKey = Object.fromEntries(result.patches.map((p) => [p.row.dedupe_key, p.patch.status]));
     assert.deepEqual(byKey, { a: "verified", b: "verified", c: "verified_bad" });
-    assert.equal(result.stats.mv_file_id, "940");
-    assert.equal(charges[0], 0.178);
-    assert.equal(charges[1], 0.8);
+    assert.equal(result.stats.run_id, "11111111-1111-1111-1111-111111111111");
+    assert.ok(feeds.size === 1);
+    assert.ok(Math.abs(charges[0] - (2 * 0.178 + 0.8)) < 1e-9);
   });
 });
 
@@ -201,7 +200,7 @@ describe("spend + location + logs + backoff", () => {
   it("detects a cap breach", () => {
     assert.equal(wouldExceedCap(400, 101, 500), true);
     assert.equal(wouldExceedCap(400, 100, 500), false);
-    assert.ok(Math.abs(estimateMvCents(10, 0.178) - 1.78) < 1e-9);
+    assert.ok(Math.abs(estimateVerifierCents(10, { mvCentsPerCredit: 0.178, n2bCentsPerCheck: 0.8 }) - 9.78) < 1e-9);
   });
 
   it("builds location and smartlead lead without inventing fields", () => {

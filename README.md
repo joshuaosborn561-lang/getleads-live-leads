@@ -1,50 +1,82 @@
-# SalesGlider engager worker
+# sg-engager-pipeline
 
-Background worker that takes `public.sg_engager_inbox` rows from `pending_verification` through verification, `leads_staging`, and Smartlead import.
+One service from getleads capture to Smartlead import. It is the only process that may write inbox status after `gl-engager-hook`.
 
-Deploy target is Railway, in the same project as [verifyfall](https://verifyfall-production.up.railway.app). Share that service's `MILLIONVERIFIER_API_KEY` and `NO2BOUNCE_API_KEY`.
+```
+getleads capture (already running)
+   ↓  pull
+prospect gates
+   ↓
+company resolution (Apify)
+   ↓
+email resolution (Email Finder Waterfall MCP)
+   ↓
+POST gl-engager-hook
+   ↓
+verification (Email Verifier Progression MCP)
+   ↓
+leads_staging → Smartlead import (campaigns stay DRAFTED)
+```
 
-## Sweep (every `SWEEP_INTERVAL_MINUTES`, default 15)
+Volume is not the goal. Ambiguous leads are dropped or parked. Paid calls never run before the prospect gates.
 
-1. **Claim** up to 500 `pending_verification` rows with `SELECT … FOR UPDATE SKIP LOCKED` and mark them `verifying` in the same transaction.
-2. **Suppression** against `public.sg_engager_suppression` (created and seeded on bootstrap). Matching domains become `suppressed`. Rows are never deleted.
-3. **Dedupe** against Smartlead `GET /campaigns/{id}/leads?email=` and against the inbox on `lower(engager_email)` (first `id` wins). Hits become `duplicate`.
-4. **Verify** remaining emails with the MillionVerifier bulk API. `ok` → `verified`. Hard invalid (`invalid`, `disposable`) → `verified_bad`. `catch_all` and `unknown` go to No2Bounce. N2B passes → `verified`. N2B failures → `verified_bad`.
-5. **Spend cap.** `MONTHLY_SPEND_CAP_CENTS` (default 500) is persisted in `public.sg_worker_spend`. If the next paid batch would exceed the cap, verification stops, remaining rows go back to `pending_verification`, and one log line is written. Nothing is skipped silently.
-6. **Stage** `verified` rows into `public.leads_staging` (email, `first_name_n`, `engager_last_name`, `company_n`, `campaign_id`, plus LinkedIn/location when present). Inbox status becomes `staged`.
-7. **Import** staged rows with `POST /campaigns/{id}/leads` in chunks of 200. Success only when `upload_count === submitted`. Mismatch → `import_mismatch` and that campaign is skipped for the rest of the sweep. `upload_count` and `already_added_to_campaign` are not summed.
+## Status ownership
 
-A sweep that verifies zero and imports zero is a normal idle outcome. Overlapping ticks are skipped; there is no retry loop.
+| Status | Who writes it | Next step |
+| --- | --- | --- |
+| `pending_verification` | webhook on insert; pipeline after a parked row is fully resolved | verify sweep |
+| `needs_email` | webhook | parked resolution |
+| `needs_company_data` | webhook | parked resolution |
+| `pending_campaign` | webhook | parked (unrecognized creator) |
+| `dq_size` | webhook or parked re-gate | terminal |
+| `verifying` | pipeline claim | verifier |
+| `suppressed` | pipeline | terminal |
+| `duplicate` | pipeline | terminal |
+| `verified` | pipeline | stage |
+| `verified_bad` | pipeline | terminal |
+| `staged` | pipeline | import |
+| `imported` | pipeline | terminal |
+| `import_mismatch` | pipeline | retry next sweep unless campaign is skipped this run |
+| `unresolvable` | pipeline after max resolution attempts | terminal |
+| `error` | pipeline after 3-attempt backoff | inspect `routing_note` |
+
+Terminal, never reprocessed: `dq_size`, `pending_campaign`, `suppressed`, `duplicate`, `verified_bad`, `imported`, `unresolvable`.
+
+The webhook is the only insert path into `sg_engager_inbox`. Re-POSTing the same `dedupeKey` is a no-op (`ignoreDuplicates`). `dedupeKey` is getleads `leadId`. Never invent one.
+
+## Loops
+
+- **Pull** every `RUN_INTERVAL_MINUTES` (60): high-water mark per `profileId` on `capturedAt`, gates, optional paid resolve (capped by `ENRICHMENT_BATCH_LIMIT`), webhook batches of 200.
+- **Verify** every `VERIFY_SWEEP_INTERVAL_MINUTES` (15): claim `pending_verification`, suppress, dedupe, Email Verifier Progression, stage, import.
+
+A run that pulls zero and imports zero is normal. It logs and exits the tick. No retry loop.
+
+## Spend
+
+`public.sg_pipeline_spend` is month-keyed and split `apify` / `waterfall` / `verifier`. One cap: `MONTHLY_SPEND_CAP_CENTS`. When the next paid call would exceed it, spending stops, rows stay parked, and one log line is written.
+
+Ship the first pass at `ENRICHMENT_BATCH_LIMIT=100` and read `/health` `first_run` before raising the batch or the cap.
 
 ## Hard rules
 
-- Never change campaign status. Never call START, PAUSE, or any campaign state endpoint.
-- Never log lead rows, emails, or names. Logs carry counts, statuses, job ids, and spend only.
-- Terminal for this worker: `needs_email`, `needs_company_data`, `pending_campaign`, `dq_size`, `suppressed`, `duplicate`, `verified_bad`.
-- Writes are idempotent on `dedupe_key`.
-- External calls use a 3-attempt backoff, then the row is marked `error` with the message in `routing_note`.
+- Never call Smartlead START, PAUSE, or any campaign state endpoint.
+- Never add, remove, or pause a getleads monitored profile.
+- Never insert inbox rows except through the webhook.
+- Never log emails, names, or lead rows. Counts, statuses, job ids, spend, distributions only.
+- Never call AI Ark, LeadMagic, FullEnrich, Name to Email, MillionVerifier, or No2Bounce directly.
+
+## Health
+
+`GET /health` returns counts by status, last-run timestamps per profile, month-to-date spend by vendor, and the persisted first-run report.
+
+`GET /feeds/:id.csv` is the short-lived CSV host Email Verifier Progression fetches. Requires `PUBLIC_BASE_URL` (Railway public domain).
 
 ## Env
 
-| Name | Required | Default |
-| --- | --- | --- |
-| `SUPABASE_URL` | yes | |
-| `SUPABASE_SERVICE_ROLE_KEY` | yes | |
-| `SMARTLEAD_API_KEY` | yes | |
-| `MILLIONVERIFIER_API_KEY` | yes | |
-| `NO2BOUNCE_API_KEY` | yes | |
-| `MONTHLY_SPEND_CAP_CENTS` | no | `500` |
-| `SWEEP_INTERVAL_MINUTES` | no | `15` |
-| `PORT` | no | `8080` |
-
-Optional cost knobs: `MV_CENTS_PER_CREDIT` (default `0.178`) and `N2B_CENTS_PER_CHECK` (default `0.8`).
-
-## Railway
-
-Add a service in the verifyfall project, point it at this repo, and share the verifier keys from verifyfall. Set the Supabase and Smartlead vars on the new service. Health check: `GET /health`.
+See `.env.example`. Required at runtime: `GETLEADS_API_KEY`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `SMARTLEAD_API_KEY`. Paid MCPs need `APIFY_TOKEN` plus the waterfall and verifier URLs.
 
 ```bash
 npm test
-npm start          # loop
+npm start
 node src/index.js --once
 ```

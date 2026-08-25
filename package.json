@@ -1,18 +1,19 @@
 {
-  "name": "sg-engager-worker",
+  "name": "sg-engager-pipeline",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "SalesGlider engager pipeline worker: inbox → verify → leads_staging → Smartlead",
+  "description": "SalesGlider engager pipeline: getleads pull → gates → resolve → webhook → verify → Smartlead",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
     "start": "node src/index.js",
-    "sweep": "node src/index.js --once",
+    "once": "node src/index.js --once",
     "test": "node --test --test-concurrency=1 tests/*.test.js"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.57.4"
+    "@supabase/supabase-js": "^2.57.4",
+    "apify-client": "^2.25.0"
   }
 }
