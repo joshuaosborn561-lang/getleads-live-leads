@@ -14,11 +14,11 @@ async function main() {
 
   const reset = await supabase
     .from("sg_engager_inbox")
-    .update({ status: "pending_verification", routing_note: null })
+    .update({ status: "pending_verification", routing_note: null }, { count: "exact" })
     .eq("status", "error")
     .eq("routing_note", "HTTP 400 GET")
-    .select("id", { count: "exact", head: true });
-  console.log(JSON.stringify({ step: "reset", n: reset.count ?? 0, error: reset.error?.message || null }));
+    .select("id");
+  console.log(JSON.stringify({ step: "reset", n: reset.count ?? reset.data?.length ?? 0, error: reset.error?.message || null }));
 
   const probeId = `vf_preflight_${Date.now().toString(36)}`;
   const probe = await putFeed(supabase, probeId, "Email\npreflight@example.com\n", {
