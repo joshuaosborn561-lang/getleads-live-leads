@@ -112,44 +112,40 @@ export async function loadFirstRunReport(supabase) {
   return data || null;
 }
 
-export async function putFeed(supabase, id, csv, fetchImpl = globalThis.fetch) {
-  const path = `${id}.csv`;
-  const base = String(supabase.supabaseUrl || "").replace(/\/$/, "");
-  const key = supabase.supabaseKey;
-  if (base && key) {
-    const objectUrl = `${base}/storage/v1/object/sg-engager-feeds/${path}`;
-    const res = await fetchImpl(objectUrl, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${key}`,
-        apikey: key,
-        "content-type": "text/csv; charset=utf-8",
-        "x-upsert": "true",
-      },
-      body: String(csv),
-    });
-    if (!res.ok) {
-      const text = await res.text();
-      throw new Error(`feed upload: HTTP ${res.status} ${String(text).slice(0, 160)}`);
-    }
-    const publicUrl = `${base}/storage/v1/object/public/sg-engager-feeds/${path}`;
-    const check = await fetchImpl(publicUrl);
-    if (!check.ok) throw new Error(`feed not public: HTTP ${check.status}`);
-    return publicUrl;
+export async function putFeed(supabase, id, csv, options = {}) {
+  const fetchImpl = typeof options === "function" ? options : options.fetchImpl || globalThis.fetch;
+  const path = `${String(id).replace(/[^A-Za-z0-9._-]/g, "")}.csv`;
+  const base = String(
+    options.supabaseUrl || supabase?.supabaseUrl || process.env.SUPABASE_URL || "",
+  ).replace(/\/$/, "");
+  const key =
+    options.supabaseKey || supabase?.supabaseKey || process.env.SUPABASE_SERVICE_ROLE_KEY;
+  if (!base || !key) {
+    throw new Error("supabase storage is not configured");
   }
-  if (supabase.storage?.from) {
-    const uploaded = await supabase.storage.from("sg-engager-feeds").upload(path, String(csv), {
-      contentType: "text/csv; charset=utf-8",
-      upsert: true,
-    });
-    if (uploaded?.error) throw new Error(`feed upload: ${uploaded.error.message}`);
-    const { data } = supabase.storage.from("sg-engager-feeds").getPublicUrl(path);
-    if (!data?.publicUrl) throw new Error("feed upload: public URL missing");
-    return data.publicUrl;
+  const objectUrl = `${base}/storage/v1/object/sg-engager-feeds/${path}`;
+  const res = await fetchImpl(objectUrl, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${key}`,
+      apikey: key,
+      "content-type": "text/csv; charset=utf-8",
+      "x-upsert": "true",
+    },
+    body: String(csv),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`feed upload: HTTP ${res.status} ${String(text).slice(0, 160)}`);
   }
-  const { error } = await supabase.from("sg_pipeline_feeds").upsert({ id, csv }, { onConflict: "id" });
-  throwIfError({ error }, "feed upsert");
-  return null;
+  const publicUrl = `${base}/storage/v1/object/public/sg-engager-feeds/${path}`;
+  const check = await fetchImpl(publicUrl, { method: "GET" });
+  if (!check.ok) throw new Error(`feed not public: HTTP ${check.status}`);
+  const body = await check.text();
+  if (!/^Email(?:\r?\n|$)/i.test(body)) {
+    throw new Error("feed not public: uploaded CSV missing Email header");
+  }
+  return publicUrl;
 }
 
 export async function getFeed(supabase, id) {

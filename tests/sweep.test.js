@@ -162,10 +162,12 @@ describe("runSweep", () => {
         n2bCentsPerCheck: 0.8,
         importChunkSize: 200,
         publicBaseUrl: "https://pipeline.test",
+        supabaseUrl: "https://proj.supabase.co",
+        supabaseServiceRoleKey: "key",
       },
       verifier: {
         async start({ fileUrl }) {
-          assert.match(fileUrl, /^https:\/\/files\.test\/.+\.csv$/);
+          assert.match(fileUrl, /^https:\/\/proj\.supabase\.co\/storage\/v1\/object\/public\/sg-engager-feeds\/.+\.csv$/);
           return { run_id: "22222222-2222-2222-2222-222222222222" };
         },
         async waitForRun() { return { status: "completed", mv_credits_used: 1, n2b_credits_used: 0 }; },
@@ -174,8 +176,9 @@ describe("runSweep", () => {
         },
       },
       fetchImpl: async (url) => {
-        if (String(url).includes("s.csv")) return { text: async () => "Email\nok@acme.com\n" };
-        return { text: async () => "Email\n" };
+        const u = String(url);
+        if (u.includes("s.csv")) return { ok: true, status: 200, text: async () => "Email\nok@acme.com\n" };
+        return { ok: true, status: 200, text: async () => "Email\n" };
       },
       smartlead: {
         async campaignHasEmail() { return false; },

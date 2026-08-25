@@ -240,35 +240,43 @@ describe("spend + location + logs + backoff", () => {
     assert.deepEqual(extra, { verified: 3, spend_cents: 1.2 });
   });
 
-  it("uploads the verifier CSV as bytes and returns the public storage URL", async () => {
-    const uploads = [];
+  it("uploads the verifier CSV via storage REST and confirms a public GET", async () => {
+    const calls = [];
+    const csv = "Email\na@b.com\n";
+    const fetchImpl = async (url, options = {}) => {
+      calls.push({ url: String(url), method: options.method || "GET", body: options.body || "" });
+      if ((options.method || "GET") === "POST") {
+        return { ok: true, status: 200, text: async () => "" };
+      }
+      return { ok: true, status: 200, text: async () => csv };
+    };
     const url = await putFeed(
-      {
-        storage: {
-          from(bucket) {
-            return {
-              async upload(path, body, opts) {
-                uploads.push({
-                  bucket,
-                  path,
-                  bytes: Buffer.isBuffer(body) ? body.length : String(body || "").length,
-                  type: opts.contentType,
-                });
-                return { error: null };
-              },
-              getPublicUrl(path) {
-                return { data: { publicUrl: `https://files.test/${path}` } };
-              },
-            };
-          },
-        },
-      },
+      {},
       "vf_x",
-      "Email\na@b.com\n",
+      csv,
+      { supabaseUrl: "https://proj.supabase.co", supabaseKey: "key", fetchImpl },
     );
-    assert.equal(url, "https://files.test/vf_x.csv");
-    assert.equal(uploads[0].bucket, "sg-engager-feeds");
-    assert.ok(uploads[0].bytes > 0);
+    assert.equal(url, "https://proj.supabase.co/storage/v1/object/public/sg-engager-feeds/vf_x.csv");
+    assert.equal(calls[0].method, "POST");
+    assert.match(calls[0].url, /\/object\/sg-engager-feeds\/vf_x\.csv$/);
+    assert.equal(calls[1].method, "GET");
+    assert.equal(calls[0].body, csv);
+  });
+
+  it("does not retry HTTP 400 from the verifier fetch", async () => {
+    let n = 0;
+    await assert.rejects(
+      () =>
+        withBackoff(
+          async () => {
+            n += 1;
+            throw new Error("HTTP 400 GET");
+          },
+          { attempts: 3, delaysMs: [0, 0, 0] },
+        ),
+      /HTTP 400 GET/,
+    );
+    assert.equal(n, 1);
   });
 
   it("initializes the MCP session before the first tools/call", async () => {

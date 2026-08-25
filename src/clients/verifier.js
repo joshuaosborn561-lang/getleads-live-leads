@@ -5,11 +5,19 @@ export function createVerifier(config, deps = {}) {
   const mcp = deps.mcp ?? createMcpClient({ url: config.emailVerifierMcpUrl, fetchImpl: deps.fetchImpl });
 
   async function start({ fileUrl, segmentName }) {
-    return withBackoff(() =>
-      mcp.callTool("start_verification", {
-        file_url: fileUrl,
-        segment_name: segmentName,
-      }),
+    if (!fileUrl || !/^https:\/\//i.test(fileUrl) || /up\.railway\.app/i.test(fileUrl)) {
+      throw new Error("verifier CSV must be a public https URL (not Railway /feeds)");
+    }
+    return withBackoff(
+      () =>
+        mcp.callTool(
+          "start_verification",
+          {
+            file_url: fileUrl,
+            segment_name: segmentName,
+          },
+          { timeout: 120_000 },
+        ),
     );
   }
 

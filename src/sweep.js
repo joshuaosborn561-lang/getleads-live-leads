@@ -102,7 +102,21 @@ export async function runSweep({ supabase, config, verifier, smartlead, log, fet
       spendCents: spend.spendCents,
       verifier,
       publicBaseUrl: config.publicBaseUrl,
-      putCsv: (id, csv) => putFeed(supabase, id, csv),
+      putCsv: async (id, csv) => {
+        const url = await putFeed(supabase, id, csv, {
+          supabaseUrl: config.supabaseUrl,
+          supabaseKey: config.supabaseServiceRoleKey,
+          fetchImpl,
+        });
+        let host = "none";
+        try {
+          host = new URL(url).hostname;
+        } catch {
+          host = "invalid";
+        }
+        log.info("verifier csv hosted", { host, ok: Boolean(url) });
+        return url;
+      },
       fetchImpl,
       onCapHit,
       charge: (vendor, cents) => addSpend(supabase, vendor, cents),

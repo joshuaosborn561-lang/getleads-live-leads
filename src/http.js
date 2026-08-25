@@ -11,15 +11,23 @@ export function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export async function withBackoff(fn, { attempts = 3, delaysMs = [500, 1500, 3500] } = {}) {
+export function isRetryable(err) {
+  const msg = String(err?.message || "");
+  if (/HTTP 400/.test(msg) || /MCP HTTP 4\d\d/.test(msg)) return false;
+  return true;
+}
+
+export async function withBackoff(fn, { attempts = 3, delaysMs = [500, 1500, 3500], retry = isRetryable } = {}) {
   let lastError;
   for (let i = 0; i < attempts; i += 1) {
     try {
       return await fn(i);
     } catch (err) {
       lastError = err;
-      if (i < attempts - 1) {
+      if (i < attempts - 1 && retry(lastError)) {
         await sleep(delaysMs[i] ?? delaysMs[delaysMs.length - 1]);
+      } else if (!retry(lastError)) {
+        throw lastError;
       }
     }
   }
