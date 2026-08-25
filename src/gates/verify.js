@@ -66,14 +66,27 @@ export async function verifyRows({
   const feedId = `vf_${Date.now().toString(36)}`;
   const header = "Email\n";
   const csv = header + rows.map((r) => normalizeEmail(r.engager_email)).join("\n") + "\n";
-  const hostedUrl = await putCsv(feedId, csv);
-  const fileUrl = hostedUrl || (publicBaseUrl ? `${publicBaseUrl.replace(/\/$/, "")}/feeds/${feedId}.csv` : "");
-  if (!fileUrl) {
+  let fileUrl = "";
+  try {
+    fileUrl = (await putCsv(feedId, csv)) || "";
+  } catch (err) {
     return {
       stats: { ...stats, error: rows.length },
       patches: rows.map((row) => ({
         row,
-        patch: { status: "error", routing_note: "PUBLIC_BASE_URL missing; cannot host verifier CSV" },
+        patch: { status: "error", routing_note: String(err.message || "feed upload failed").slice(0, 500) },
+      })),
+    };
+  }
+  if (!fileUrl || !/^https:\/\//i.test(fileUrl) || /up\.railway\.app/i.test(fileUrl)) {
+    return {
+      stats: { ...stats, error: rows.length },
+      patches: rows.map((row) => ({
+        row,
+        patch: {
+          status: "error",
+          routing_note: "verifier CSV must be a public https URL (not Railway /feeds)",
+        },
       })),
     };
   }
@@ -83,10 +96,11 @@ export async function verifyRows({
   try {
     const started = await verifier.start({
       fileUrl,
-      segmentName: `sg-engager-${new Date().toISOString().slice(0, 16)}`,
+      segmentName: `sg-engager-${new Date().toISOString().slice(0, 16).replace(/[:.]/g, "-")}`,
     });
     runId = extractRunId(started);
     stats.run_id = runId;
+    if (!runId) throw new Error("verifier start returned no run_id");
     run = await verifier.waitForRun(runId);
   } catch (err) {
     return {

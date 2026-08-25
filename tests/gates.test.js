@@ -72,6 +72,21 @@ describe("verifier mapping", () => {
     assert.equal(classifyFromSets("miss@acme.com", new Set(), new Set()), "unknown");
   });
 
+  it("rejects Railway feed URLs that VerifyFall cannot fetch", async () => {
+    const result = await verifyRows({
+      rows: [row()],
+      config: { monthlySpendCapCents: 500, mvCentsPerCredit: 0.178, n2bCentsPerCheck: 0.8 },
+      spendCents: 0,
+      verifier: { start() { throw new Error("should not start"); } },
+      putCsv: async () => "https://sg-engager-pipeline-production.up.railway.app/feeds/vf_x.csv",
+      publicBaseUrl: "https://sg-engager-pipeline-production.up.railway.app",
+      onCapHit: async () => {},
+      charge: async () => ({ spendCents: 0 }),
+    });
+    assert.equal(result.stats.error, 1);
+    assert.match(result.patches[0].patch.routing_note, /not Railway/);
+  });
+
   it("stops before the verifier when the cap would be exceeded", async () => {
     const logs = [];
     const result = await verifyRows({
@@ -119,7 +134,10 @@ describe("verifier mapping", () => {
       spendCents: 0,
       verifier,
       publicBaseUrl: "https://pipeline.test",
-      putCsv: async (id, csv) => feeds.set(id, csv),
+      putCsv: async (id, csv) => {
+        feeds.set(id, csv);
+        return `https://files.test/feeds/${id}.csv`;
+      },
       fetchImpl,
       onCapHit: async () => {},
       charge: async (_vendor, cents) => {

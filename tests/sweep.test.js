@@ -85,6 +85,21 @@ function createFake({ claimed = [], verified = [], staged = [], spend = 0 } = {}
     },
   };
 
+  supabase.storage = {
+    from(bucket) {
+      return {
+        async upload(path, body) {
+          store.feeds.set(path, String(body));
+          store.bucket = bucket;
+          return { error: null };
+        },
+        getPublicUrl(path) {
+          return { data: { publicUrl: `https://files.test/${path}` } };
+        },
+      };
+    },
+  };
+
   return { supabase, store };
 }
 
@@ -150,7 +165,7 @@ describe("runSweep", () => {
       },
       verifier: {
         async start({ fileUrl }) {
-          assert.match(fileUrl, /\/feeds\/.+\.csv$/);
+          assert.match(fileUrl, /^https:\/\/files\.test\/.+\.csv$/);
           return { run_id: "22222222-2222-2222-2222-222222222222" };
         },
         async waitForRun() { return { status: "completed", mv_credits_used: 1, n2b_credits_used: 0 }; },
