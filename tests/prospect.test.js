@@ -308,6 +308,39 @@ describe("pull cursor + webhook map", () => {
     assert.equal(result.leads[0].companyDomain, "acme.com");
   });
 
+  it("runs Apify profile chunks concurrently", async () => {
+    let inFlight = 0;
+    let maxInFlight = 0;
+    const leads = Array.from({ length: 6 }, (_, i) => ({
+      dedupeKey: `d${i}`,
+      engagerCompany: "Acme",
+      engagerLinkedinUrl: `https://www.linkedin.com/in/p${i}`,
+    }));
+    const result = await resolveCompanies({
+      leads,
+      apify: {
+        async scrapeProfiles(urls) {
+          inFlight += 1;
+          maxInFlight = Math.max(maxInFlight, inFlight);
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          inFlight -= 1;
+          return {
+            items: urls.map((linkedinUrl) => ({ linkedinUrl, company: "Acme", employees: "11 to 50" })),
+            usageTotalUsd: 0,
+            runId: "p",
+          };
+        },
+      },
+      config: { apifyToken: "t", apifyBatchSize: 2, apifyConcurrency: 3, apifyCentsPerProfile: 0.4 },
+      spend: { spendCents: 0 },
+      supabase: { async rpc() { return { data: { month_key: "2026-08", apify_cents: 0, waterfall_cents: 0, verifier_cents: 0 }, error: null }; } },
+      log: { info() {}, warn() {} },
+      cap: 500,
+    });
+    assert.equal(result.stats.attempted, 6);
+    assert.ok(maxInFlight >= 2, `expected overlapping Apify runs, got ${maxInFlight}`);
+  });
+
   it("re-gates parked placeholder bands as missing size, not dq_size", () => {
     assert.equal(
       nextParkedStatus(

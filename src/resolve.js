@@ -9,6 +9,7 @@ import {
   normCompany,
   normFirstName,
 } from "./normalize.js";
+import { mapPool } from "./http.js";
 import { addSpend, wouldExceedCap } from "./spend.js";
 import { emailDomain, normalizeEmail } from "./util/email.js";
 
@@ -114,16 +115,22 @@ export async function resolveCompanies({ leads, apify, config, spend, supabase, 
   }
 
   let current = spend;
-  const remainingBudget = () => cap - current.spendCents;
-  const canAfford = (n) =>
-    !wouldExceedCap(current.spendCents, n * config.apifyCentsPerProfile, cap);
-
-  for (const part of chunk(missing, config.apifyBatchSize)) {
-    if (!canAfford(part.length) || remainingBudget() <= 0) {
+  const parts = chunk(missing, config.apifyBatchSize);
+  const concurrency = Math.max(1, config.apifyConcurrency || 4);
+  const affordable = [];
+  let planned = 0;
+  for (const part of parts) {
+    const cost = part.length * config.apifyCentsPerProfile;
+    if (wouldExceedCap(current.spendCents, planned + cost, cap)) {
       stats.skipped_cap += part.length;
-      await logCap(log, "apify", current, cap, part.length * config.apifyCentsPerProfile);
+      await logCap(log, "apify", current, cap, cost);
       break;
     }
+    planned += cost;
+    affordable.push(part);
+  }
+
+  await mapPool(affordable, concurrency, async (part) => {
     stats.attempted += part.length;
     try {
       const result = await apify.scrapeProfiles(part.map((l) => l.engagerLinkedinUrl), {
@@ -133,7 +140,7 @@ export async function resolveCompanies({ leads, apify, config, spend, supabase, 
         ? Number(result.usageTotalUsd) * 100
         : part.length * config.apifyCentsPerProfile;
       if (cents > 0) {
-        current = await addSpend(supabase, "apify", cents);
+        await addSpend(supabase, "apify", cents);
         stats.spend_cents += cents;
       }
       log.info("apify run complete", {
@@ -152,7 +159,11 @@ export async function resolveCompanies({ leads, apify, config, spend, supabase, 
         lead.resolveError = String(err.message || "apify failed").slice(0, 500);
       }
     }
-  }
+  });
+  current = {
+    ...current,
+    spendCents: Number(spend.spendCents || 0) + Number(stats.spend_cents || 0),
+  };
 
   if (apify?.scrapeCompanies) {
     current = await resolveCompanySizes({
@@ -181,39 +192,45 @@ export async function resolveCompanySizes({ leads, apify, config, spend, supabas
     await logCap(log, "apify-company", current, cap, estimate);
     return current;
   }
+  const companyChunks = urls.length > 200 ? chunk(urls, 100) : [urls];
+  const companyConcurrency = companyChunks.length > 1 ? Math.min(3, companyChunks.length) : 1;
+  let companySpend = 0;
   try {
-    const result = await apify.scrapeCompanies(urls, {
-      maxTotalChargeUsd: Math.max(0.05, estimate / 100 + 0.1),
+    await mapPool(companyChunks, companyConcurrency, async (part) => {
+      const result = await apify.scrapeCompanies(part, {
+        maxTotalChargeUsd: Math.max(0.05, (part.length * config.apifyCentsPerProfile) / 100 + 0.1),
+      });
+      const cents = result.usageTotalUsd
+        ? Number(result.usageTotalUsd) * 100
+        : part.length * config.apifyCentsPerProfile;
+      if (cents > 0) {
+        await addSpend(supabase, "apify", cents);
+        stats.spend_cents += cents;
+        companySpend += cents;
+      }
+      log.info("apify company run complete", {
+        run_id: result.runId,
+        count: part.length,
+        resolved_items: result.items.length,
+        spend_cents: cents,
+      });
+      for (const lead of need) {
+        const item = matchCompanyItem(lead, result.items);
+        if (!item) continue;
+        if (item.employees) {
+          lead.engagerEmployees = item.employees;
+          stats.resolved += 1;
+        }
+        if (item.website) {
+          lead.engagerCompanyWebsite = item.website;
+          lead.companyDomain = domainFromWebsite(item.website) || lead.companyDomain;
+        }
+        if (item.name && !lead.engagerCompany) {
+          lead.engagerCompany = item.name;
+          lead.companySource = "linkedin";
+        }
+      }
     });
-    const cents = result.usageTotalUsd
-      ? Number(result.usageTotalUsd) * 100
-      : urls.length * config.apifyCentsPerProfile;
-    if (cents > 0) {
-      current = await addSpend(supabase, "apify", cents);
-      stats.spend_cents += cents;
-    }
-    log.info("apify company run complete", {
-      run_id: result.runId,
-      count: urls.length,
-      resolved_items: result.items.length,
-      spend_cents: cents,
-    });
-    for (const lead of need) {
-      const item = matchCompanyItem(lead, result.items);
-      if (!item) continue;
-      if (item.employees) {
-        lead.engagerEmployees = item.employees;
-        stats.resolved += 1;
-      }
-      if (item.website) {
-        lead.engagerCompanyWebsite = item.website;
-        lead.companyDomain = domainFromWebsite(item.website) || lead.companyDomain;
-      }
-      if (item.name && !lead.engagerCompany) {
-        lead.engagerCompany = item.name;
-        lead.companySource = "linkedin";
-      }
-    }
   } catch (err) {
     stats.errors += need.length;
     log.warn("apify company scrape failed", {
@@ -221,7 +238,10 @@ export async function resolveCompanySizes({ leads, apify, config, spend, supabas
       count: urls.length,
     });
   }
-  return current;
+  return {
+    ...current,
+    spendCents: Number(current.spendCents || 0) + companySpend,
+  };
 }
 
 export async function resolveEmails({ leads, waterfall, config, spend, supabase, log, cap }) {

@@ -1,3 +1,4 @@
+import { mapPool } from "../http.js";
 import { normalizeEmail } from "../util/email.js";
 
 export function applyInboxDedupe(rows, existing = []) {
@@ -36,29 +37,33 @@ export function applyInboxDedupe(rows, existing = []) {
   return { duplicates, remaining };
 }
 
-export async function applySmartleadDedupe(rows, smartlead) {
+export async function applySmartleadDedupe(rows, smartlead, { concurrency = 8 } = {}) {
   const duplicates = [];
   const remaining = [];
+  const lookups = [];
   for (const row of rows) {
     const campaignId = row.campaign_id;
     const email = normalizeEmail(row.engager_email);
-    if (!campaignId || !email) {
-      remaining.push(row);
-      continue;
-    }
+    if (!campaignId || !email) remaining.push(row);
+    else lookups.push(row);
+  }
+  const results = await mapPool(lookups, Math.max(1, concurrency), async (row) => {
     try {
-      const present = await smartlead.campaignHasEmail(campaignId, email);
-      if (present) {
-        duplicates.push({
-          row,
-          patch: { status: "duplicate", routing_note: "already in smartlead campaign" },
-        });
-        continue;
-      }
-      remaining.push(row);
+      const present = await smartlead.campaignHasEmail(row.campaign_id, normalizeEmail(row.engager_email));
+      return present
+        ? {
+            kind: "dup",
+            row,
+            patch: { status: "duplicate", routing_note: "already in smartlead campaign" },
+          }
+        : { kind: "ok", row };
     } catch (err) {
-      remaining.push({ ...row, __error: err.message || "smartlead lookup failed" });
+      return { kind: "err", row: { ...row, __error: err.message || "smartlead lookup failed" } };
     }
+  });
+  for (const item of results) {
+    if (item.kind === "dup") duplicates.push({ row: item.row, patch: item.patch });
+    else remaining.push(item.row);
   }
   const errors = remaining.filter((r) => r.__error);
   const ok = remaining.filter((r) => !r.__error);
