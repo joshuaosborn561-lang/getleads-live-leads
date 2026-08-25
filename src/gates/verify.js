@@ -63,7 +63,12 @@ export async function verifyRows({
     return { stats, patches, releaseKeys: rows.map((r) => r.dedupe_key) };
   }
 
-  if (!publicBaseUrl) {
+  const feedId = `vf_${Date.now().toString(36)}`;
+  const header = "Email\n";
+  const csv = header + rows.map((r) => normalizeEmail(r.engager_email)).join("\n") + "\n";
+  const hostedUrl = await putCsv(feedId, csv);
+  const fileUrl = hostedUrl || (publicBaseUrl ? `${publicBaseUrl.replace(/\/$/, "")}/feeds/${feedId}.csv` : "");
+  if (!fileUrl) {
     return {
       stats: { ...stats, error: rows.length },
       patches: rows.map((row) => ({
@@ -72,12 +77,6 @@ export async function verifyRows({
       })),
     };
   }
-
-  const feedId = `vf_${Date.now().toString(36)}`;
-  const header = "Email\n";
-  const csv = header + rows.map((r) => normalizeEmail(r.engager_email)).join("\n") + "\n";
-  await putCsv(feedId, csv);
-  const fileUrl = `${publicBaseUrl.replace(/\/$/, "")}/feeds/${feedId}.csv`;
 
   let runId;
   let run;

@@ -113,8 +113,24 @@ export async function loadFirstRunReport(supabase) {
 }
 
 export async function putFeed(supabase, id, csv) {
+  const path = `${id}.csv`;
+  if (supabase.storage?.from) {
+    try {
+      const uploaded = await supabase.storage.from("sg-engager-feeds").upload(path, csv, {
+        contentType: "text/csv; charset=utf-8",
+        upsert: true,
+      });
+      if (!uploaded?.error) {
+        const { data } = supabase.storage.from("sg-engager-feeds").getPublicUrl(path);
+        if (data?.publicUrl) return data.publicUrl;
+      }
+    } catch {
+      // fall through to the in-process CSV host
+    }
+  }
   const { error } = await supabase.from("sg_pipeline_feeds").upsert({ id, csv }, { onConflict: "id" });
   throwIfError({ error }, "feed upsert");
+  return null;
 }
 
 export async function getFeed(supabase, id) {
