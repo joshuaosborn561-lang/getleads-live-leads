@@ -10,6 +10,12 @@ function leadsFromBody(body) {
   return [];
 }
 
+export function leadInCampaign(body, campaignId) {
+  const campaigns = body?.lead_campaign_data;
+  if (!Array.isArray(campaigns) || !campaignId) return false;
+  return campaigns.some((c) => Number(c.campaign_id) === Number(campaignId));
+}
+
 export function extractUploadCount(body) {
   if (!body || typeof body !== "object") return null;
   const raw = body.upload_count ?? body.data?.upload_count;
@@ -34,12 +40,12 @@ export function createSmartlead(config, deps = {}) {
 
   async function campaignHasEmail(campaignId, email) {
     const res = await withBackoff(() =>
-      requestJson(url(`/campaigns/${campaignId}/leads`, { email }), {
+      requestJson(url(`/leads/`, { email }), {
         fetchImpl,
         timeoutMs: 30_000,
       }),
     );
-    return leadsFromBody(res.json).length > 0;
+    return leadInCampaign(res.json, campaignId);
   }
 
   async function addLeads(campaignId, leadList) {

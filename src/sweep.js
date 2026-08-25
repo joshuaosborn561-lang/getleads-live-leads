@@ -80,7 +80,10 @@ export async function runSweep({ supabase, config, verifier, smartlead, log, fet
         supabase,
         slErrors.map((row) => ({
           row,
-          patch: { status: "error", routing_note: String(row.__error).slice(0, 500) },
+          patch: {
+            status: "error",
+            routing_note: `smartlead: ${String(row.__error).slice(0, 480)}`,
+          },
         })),
       );
       counts.error += slErrors.length;

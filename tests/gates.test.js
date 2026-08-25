@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { extractUploadCount, formatLocation, toSmartleadLead } from "../src/clients/smartlead.js";
+import { createSmartlead, extractUploadCount, formatLocation, leadInCampaign, toSmartleadLead } from "../src/clients/smartlead.js";
 import { classifyFromSets, estimateVerifierCents, verifyRows } from "../src/gates/verify.js";
 import { applyInboxDedupe } from "../src/gates/dedupe.js";
 import { applySuppression } from "../src/gates/suppression.js";
@@ -208,6 +208,39 @@ describe("stage + import", () => {
   it("does not treat already_added as extra credit toward success", () => {
     assert.equal(extractUploadCount({ upload_count: 2, already_added_to_campaign: 2 }), 2);
     assert.equal(extractUploadCount({ added_count: 2 }), null);
+  });
+
+  it("checks Smartlead membership from lead_campaign_data", () => {
+    assert.equal(leadInCampaign({}, 3847939), false);
+    assert.equal(leadInCampaign({ id: 1 }, 3847939), false);
+    assert.equal(
+      leadInCampaign({ lead_campaign_data: [{ campaign_id: 3847939 }] }, 3847939),
+      true,
+    );
+    assert.equal(
+      leadInCampaign({ lead_campaign_data: [{ campaign_id: 1 }] }, 3847939),
+      false,
+    );
+  });
+
+  it("looks up Smartlead leads by email instead of the campaign lead list", async () => {
+    const calls = [];
+    const smartlead = createSmartlead(
+      { smartleadBaseUrl: "https://server.smartlead.ai/api/v1", smartleadApiKey: "k" },
+      {
+        fetchImpl: async (url) => {
+          calls.push(String(url));
+          return {
+            ok: true,
+            status: 200,
+            text: async () => JSON.stringify({ lead_campaign_data: [{ campaign_id: 9 }] }),
+          };
+        },
+      },
+    );
+    assert.equal(await smartlead.campaignHasEmail(9, "pat@acme.com"), true);
+    assert.match(calls[0], /\/leads\/\?/);
+    assert.ok(!calls[0].includes("/campaigns/9/leads"));
   });
 
   it("chunks at 200", () => {
