@@ -3,7 +3,7 @@ import { applyResolvedFields, resolveCompanies, resolveEmails } from "./resolve.
 import { markByDedupeKeys, fetchByStatus } from "./inbox.js";
 import { loadSpend } from "./spend.js";
 import { loadSuppressionMap } from "./gates/suppression.js";
-import { emailDomain, isEmail, normalizeEmail } from "./util/email.js";
+import { emailDomain, isEmail } from "./util/email.js";
 
 function realEmail(...candidates) {
   for (const value of candidates) {
