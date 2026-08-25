@@ -31,6 +31,18 @@ function startHealthServer(port, getState) {
 export async function main(env = process.env, argv = process.argv) {
   const config = loadConfig(env, argv);
   assertRuntimeConfig(config);
+
+  const state = {
+    last_sweep: null,
+    last_counts: emptyCounts(),
+    running: false,
+  };
+  const server = startHealthServer(config.port, () => ({
+    last_sweep: state.last_sweep,
+    last_counts: state.last_counts,
+    running: state.running,
+  }));
+
   const supabase = createSupabase(config);
   await bootstrapSchema(supabase);
 
@@ -42,18 +54,6 @@ export async function main(env = process.env, argv = process.argv) {
     smartlead: createSmartlead(config),
     log,
   };
-
-  const state = {
-    last_sweep: null,
-    last_counts: emptyCounts(),
-    running: false,
-  };
-
-  const server = startHealthServer(config.port, () => ({
-    last_sweep: state.last_sweep,
-    last_counts: state.last_counts,
-    running: state.running,
-  }));
 
   async function tick() {
     if (state.running) {
