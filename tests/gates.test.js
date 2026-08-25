@@ -10,6 +10,7 @@ import { wouldExceedCap } from "../src/spend.js";
 import { sanitizeLogExtra } from "../src/logger.js";
 import { withBackoff } from "../src/http.js";
 import { createMcpClient } from "../src/clients/mcp.js";
+import { putFeed } from "../src/inbox.js";
 
 function row(overrides = {}) {
   return {
@@ -219,6 +220,37 @@ describe("spend + location + logs + backoff", () => {
       spend_cents: 1.2,
     });
     assert.deepEqual(extra, { verified: 3, spend_cents: 1.2 });
+  });
+
+  it("uploads the verifier CSV as bytes and returns the public storage URL", async () => {
+    const uploads = [];
+    const url = await putFeed(
+      {
+        storage: {
+          from(bucket) {
+            return {
+              async upload(path, body, opts) {
+                uploads.push({
+                  bucket,
+                  path,
+                  bytes: Buffer.isBuffer(body) ? body.length : 0,
+                  type: opts.contentType,
+                });
+                return { error: null };
+              },
+              getPublicUrl(path) {
+                return { data: { publicUrl: `https://files.test/${path}` } };
+              },
+            };
+          },
+        },
+      },
+      "vf_x",
+      "Email\na@b.com\n",
+    );
+    assert.equal(url, "https://files.test/vf_x.csv");
+    assert.equal(uploads[0].bucket, "sg-engager-feeds");
+    assert.ok(uploads[0].bytes > 0);
   });
 
   it("initializes the MCP session before the first tools/call", async () => {
