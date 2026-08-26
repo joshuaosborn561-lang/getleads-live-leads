@@ -264,7 +264,7 @@ export async function resolveCompanySizes({ leads, apify, config, spend, supabas
 
 export function waterfallRowOf(lead) {
   return {
-    domain: companyDomainOf(lead) || undefined,
+    domain: companyDomainOf(lead) || "",
     company_name: lead.engagerCompany || undefined,
     first_name: lead.engagerFirstName || String(lead.engagerFullName || "").split(/\s+/)[0] || undefined,
     last_name: lead.engagerLastName || undefined,

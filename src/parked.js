@@ -21,14 +21,24 @@ export function nextParkedStatus(row, lead) {
 }
 
 export async function runParkedResolution({ supabase, config, apify, waterfall, log }) {
-  const rows = await fetchByStatus(supabase, ["needs_email", "needs_company_data"], {
+  const parkedOrders = [
+    ["resolution_attempts", { ascending: true }],
+    ["last_resolution_at", { ascending: true, nullsFirst: true }],
+    ["id", { ascending: true }],
+  ];
+  let rows = await fetchByStatus(supabase, ["needs_email", "needs_company_data"], {
     limit: config.enrichmentBatchLimit,
-    orders: [
-      ["resolution_attempts", { ascending: true }],
-      ["last_resolution_at", { ascending: true, nullsFirst: true }],
-      ["id", { ascending: true }],
-    ],
+    hasDomain: true,
+    orders: parkedOrders,
   });
+  if (rows.length < config.enrichmentBatchLimit) {
+    const more = await fetchByStatus(supabase, ["needs_email", "needs_company_data"], {
+      limit: config.enrichmentBatchLimit - rows.length,
+      orders: parkedOrders,
+    });
+    const seen = new Set(rows.map((r) => r.id));
+    rows = rows.concat(more.filter((r) => !seen.has(r.id)));
+  }
   const stats = { claimed: rows.length, updated: 0, unresolvable: 0, error: 0, cap_hit: false };
   if (!rows.length) return stats;
 

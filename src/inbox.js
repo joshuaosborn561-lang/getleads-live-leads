@@ -43,6 +43,7 @@ export async function releaseToPending(supabase, keys) {
 
 export async function fetchByStatus(supabase, statuses, extraFilter = {}) {
   let q = supabase.from("sg_engager_inbox").select("*").in("status", statuses);
+  if (extraFilter.hasDomain) q = q.not("company_domain", "is", null).neq("company_domain", "");
   const orders = extraFilter.orders || [["id", { ascending: true }]];
   for (const [column, options] of orders) {
     q = q.order(column, options);
