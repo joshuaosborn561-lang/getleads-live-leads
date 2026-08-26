@@ -23,6 +23,7 @@ import {
   resolveEmails,
   shouldWaterfall,
   uniqueCompanyLeads,
+  uniqueCompanyLookupLeads,
 } from "../src/resolve.js";
 import { mapApifyCompany, mapApifyProfile } from "../src/clients/apify.js";
 import { nextParkedStatus } from "../src/parked.js";
@@ -220,6 +221,21 @@ describe("pull cursor + webhook map", () => {
     assert.equal(leads.length, 2);
     assert.equal(leads[0].lead_id, "a");
     assert.equal(leads[1].lead_id, "c");
+  });
+
+  it("keeps one company lookup per domain or company name", () => {
+    const leads = uniqueCompanyLookupLeads([
+      { lead_id: "a", engagerCompany: "Acme Inc" },
+      { lead_id: "b", engagerCompany: "Acme" },
+      { lead_id: "c", companyDomain: "beta.com", engagerCompany: "Beta" },
+      { lead_id: "d", engagerCompany: "Beta LLC" },
+      { lead_id: "e", engagerCompany: "Gamma" },
+    ]);
+    assert.equal(leads.length, 3);
+    assert.equal(leads[0].lead_id, "c");
+    assert.ok(leads.some((l) => l.lead_id === "a"));
+    assert.ok(leads.some((l) => l.lead_id === "e"));
+    assert.ok(!leads.some((l) => l.lead_id === "d"));
   });
 
   it("fills company size from waterfall LinkedIn lookup and never calls Apify", async () => {

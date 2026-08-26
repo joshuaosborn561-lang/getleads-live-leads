@@ -149,6 +149,25 @@ export function uniqueCompanyLeads(leads) {
   return out;
 }
 
+/** One lookup per domain, else one per normalized company name. */
+export function uniqueCompanyLookupLeads(leads) {
+  const ranked = [...leads].sort((a, b) => Number(Boolean(companyDomainOf(b))) - Number(Boolean(companyDomainOf(a))));
+  const seen = new Set();
+  const out = [];
+  for (const lead of ranked) {
+    const domain = companyDomainOf(lead);
+    const name = (normCompany(lead.engagerCompany) || "").toLowerCase();
+    const keys = [domain, name].filter(Boolean);
+    if (!keys.length || keys.some((key) => seen.has(key))) {
+      for (const key of keys) seen.add(key);
+      continue;
+    }
+    for (const key of keys) seen.add(key);
+    out.push(lead);
+  }
+  return out;
+}
+
 export function sizeFromCompanyHit(hit) {
   if (!hit) return "";
   return (
@@ -424,16 +443,25 @@ export async function readWaterfallContacts(supabase, clientTag, rows) {
 
 export async function readWaterfallCompanies(supabase, clientTag, contacts, rows) {
   const table = `${clientTag}_wf_companies`;
+  const source = [...(contacts || []), ...(rows || [])];
   const domains = [
-    ...new Set(
-      [...(contacts || []), ...(rows || [])]
-        .map((r) => r.domain)
-        .filter(Boolean)
-        .map((d) => String(d).toLowerCase()),
-    ),
+    ...new Set(source.map((r) => r.domain).filter(Boolean).map((d) => String(d).toLowerCase())),
   ];
-  if (!domains.length) return [];
-  return selectInChunks(supabase, table, "domain, company_name, employee_range, website", "domain", domains);
+  const names = [...new Set(source.map((r) => r.company_name).filter(Boolean))];
+  const seen = new Set();
+  const out = [];
+  const add = (batch) => {
+    for (const row of batch || []) {
+      const key = `${String(row.domain || "").toLowerCase()}|${row.company_name || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(row);
+    }
+  };
+  const columns = "domain, company_name, employee_range, website";
+  if (domains.length) add(await selectInChunks(supabase, table, columns, "domain", domains));
+  if (names.length) add(await selectInChunks(supabase, table, columns, "company_name", names));
+  return out;
 }
 
 function applyHitsToLeads(leads, contacts, companies, stats) {
@@ -477,8 +505,12 @@ function indexContacts(contacts) {
 
 function applyCompanyHits(leads, companies, stats) {
   const byDomain = indexCompanies(companies);
+  const byName = indexCompaniesByName(companies);
   for (const lead of leads) {
-    const company = byDomain.get(companyDomainOf(lead));
+    const company =
+      byDomain.get(companyDomainOf(lead)) ||
+      byName.get((normCompany(lead.engagerCompany) || "").toLowerCase()) ||
+      null;
     if (company && applyWaterfallHit(lead, company)) stats.resolved += 1;
   }
 }
@@ -488,6 +520,17 @@ function indexCompanies(companies) {
   for (const row of companies || []) {
     const domain = String(row.domain || "").toLowerCase();
     if (domain) map.set(domain, row);
+  }
+  return map;
+}
+
+function indexCompaniesByName(companies) {
+  const map = new Map();
+  for (const row of companies || []) {
+    const name = (normCompany(row.company_name) || "").toLowerCase();
+    if (!name) continue;
+    const prev = map.get(name);
+    if (!prev || (sizeFromCompanyHit(row) && !sizeFromCompanyHit(prev))) map.set(name, row);
   }
   return map;
 }

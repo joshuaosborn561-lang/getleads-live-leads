@@ -5,13 +5,14 @@ import { loadConfig } from "../src/config.js";
 import { countsByStatus, markByDedupeKeys } from "../src/inbox.js";
 import { createLogger } from "../src/logger.js";
 import { nextParkedStatus } from "../src/parked.js";
-import { cleanSizeBand } from "../src/normalize.js";
+import { cleanSizeBand, normCompany } from "../src/normalize.js";
 import {
   applyWaterfallHit,
   companyDomainOf,
   readWaterfallCompanies,
+  readWaterfallContacts,
   sizeFromCompanyHit,
-  uniqueCompanyLeads,
+  uniqueCompanyLookupLeads,
   waterfallRowOf,
 } from "../src/resolve.js";
 import { loadSpend } from "../src/spend.js";
@@ -69,6 +70,38 @@ function stillMissingCount(leads) {
   return leads.filter((l) => !cleanSizeBand(l.engagerEmployees)).length;
 }
 
+function applyHits(leads, companies, contacts = []) {
+  const byDomain = new Map();
+  const byName = new Map();
+  for (const company of companies || []) {
+    if (company?.domain) byDomain.set(String(company.domain).toLowerCase(), company);
+    const name = (normCompany(company?.company_name) || "").toLowerCase();
+    if (name && (!byName.has(name) || sizeFromCompanyHit(company))) byName.set(name, company);
+  }
+  const byLi = new Map();
+  const byPerson = new Map();
+  for (const contact of contacts || []) {
+    if (contact?.linkedin_url) byLi.set(String(contact.linkedin_url).toLowerCase(), contact);
+    const domain = String(contact?.domain || "").toLowerCase();
+    const first = String(contact?.first_name || "").toLowerCase();
+    const last = String(contact?.last_name || "").toLowerCase();
+    if (domain && first) byPerson.set(`${domain}|${first}|${last}`, contact);
+  }
+  let hits = 0;
+  for (const lead of leads) {
+    const company =
+      byDomain.get(companyDomainOf(lead)) ||
+      byName.get((normCompany(lead.engagerCompany) || "").toLowerCase()) ||
+      null;
+    const contact =
+      byLi.get(String(lead.engagerLinkedinUrl || "").toLowerCase()) ||
+      byPerson.get(`${companyDomainOf(lead)}|${String(lead.engagerFirstName || "").toLowerCase()}|${String(lead.engagerLastName || "").toLowerCase()}`) ||
+      null;
+    if (applyWaterfallHit(lead, contact ? { ...company, ...contact } : company)) hits += 1;
+  }
+  return hits;
+}
+
 async function persistSized(supabase, rows, leads) {
   const byKey = new Map(leads.map((l) => [l.dedupeKey, l]));
   const groups = new Map();
@@ -76,18 +109,23 @@ async function persistSized(supabase, rows, leads) {
   let dq = 0;
   for (const row of rows) {
     const lead = byKey.get(row.dedupe_key);
-    if (!lead || !cleanSizeBand(lead.engagerEmployees)) continue;
+    if (!lead) continue;
     const status = nextParkedStatus(row, lead);
-    if (
-      cleanSizeBand(row.engager_employees) === cleanSizeBand(lead.engagerEmployees) &&
-      row.status === status
-    ) {
-      continue;
-    }
+    const employees = lead.engagerEmployees || row.engager_employees;
+    const company = lead.engagerCompany || row.engager_company;
+    const domain = lead.companyDomain || row.company_domain;
+    const email = isEmail(lead.engagerEmail) ? lead.engagerEmail : row.engager_email;
+    const unchanged =
+      cleanSizeBand(row.engager_employees) === cleanSizeBand(employees) &&
+      (row.company_domain || "") === (domain || "") &&
+      (row.engager_email || "") === (email || "") &&
+      row.status === status;
+    if (unchanged) continue;
     const key = [
-      lead.engagerEmployees,
-      lead.engagerCompany || row.engager_company || "",
-      lead.companyDomain || row.company_domain || "",
+      employees || "",
+      company || "",
+      domain || "",
+      email || "",
       lead.companySource || row.company_source || "waterfall",
       status,
     ].join("|");
@@ -95,9 +133,10 @@ async function persistSized(supabase, rows, leads) {
       groups.set(key, {
         keys: [],
         patch: {
-          engager_employees: lead.engagerEmployees,
-          engager_company: lead.engagerCompany || row.engager_company,
-          company_domain: lead.companyDomain || row.company_domain,
+          engager_employees: employees || row.engager_employees,
+          engager_company: company,
+          company_domain: domain,
+          engager_email: email,
           company_source: lead.companySource || row.company_source || "waterfall",
           status,
           routing_note: "company size from getleads/aiark/leadmagic",
@@ -105,9 +144,10 @@ async function persistSized(supabase, rows, leads) {
       });
     }
     groups.get(key).keys.push(row.dedupe_key);
-    row.engager_employees = lead.engagerEmployees;
-    row.engager_company = lead.engagerCompany || row.engager_company;
-    row.company_domain = lead.companyDomain || row.company_domain;
+    row.engager_employees = employees;
+    row.engager_company = company;
+    row.company_domain = domain;
+    row.engager_email = email;
     row.status = status;
     if (status === "pending_verification" || status === "verified") pending += 1;
     if (status === "dq_size") dq += 1;
@@ -143,6 +183,13 @@ async function applyGetleadsSizes(rows, leads, getleads, log) {
       applied += 1;
     }
     if (gl.engagerCompany && !lead.engagerCompany) lead.engagerCompany = gl.engagerCompany;
+    if (gl.engagerCompanyWebsite && !lead.companyDomain) {
+      lead.companyDomain = companyDomainOf({ engagerCompanyWebsite: gl.engagerCompanyWebsite }) || lead.companyDomain;
+    }
+    if (isEmail(gl.engagerEmail) && !isEmail(lead.engagerEmail)) {
+      lead.engagerEmail = gl.engagerEmail;
+      lead.emailSource = lead.emailSource || "getleads";
+    }
   }
   log.info("getleads size apply", { pulled: pulled.leads?.length || 0, applied });
   return applied;
@@ -161,7 +208,7 @@ async function main() {
     spend_cents: spend.spendCents,
     cap_cents: config.monthlySpendCapCents,
     parked_rows: rows.length,
-    unique_companies: uniqueCompanyLeads(leads).length,
+    unique_companies: uniqueCompanyLookupLeads(leads).length,
     needs_company_data: Number(before.needs_company_data || 0),
     max_tier: MAX_TIER,
   });
@@ -173,21 +220,15 @@ async function main() {
     supabase,
     config.waterfallClientTag,
     [],
-    uniqueCompanyLeads(leads).map(waterfallRowOf),
+    uniqueCompanyLookupLeads(leads).map(waterfallRowOf),
   );
-  let existingHits = 0;
-  const byDomain = new Map();
-  for (const company of companies) {
-    if (company?.domain) byDomain.set(String(company.domain).toLowerCase(), company);
-  }
-  for (const lead of leads) {
-    const hit = byDomain.get(companyDomainOf(lead));
-    if (hit && applyWaterfallHit(lead, hit)) existingHits += 1;
-  }
+  const existingHits = applyHits(leads, companies);
   persisted = await persistSized(supabase, rows, leads);
   log.info("existing waterfall companies", { companies: companies.length, with_range: companies.filter(sizeFromCompanyHit).length, hits: existingHits });
 
-  const stillLeads = uniqueCompanyLeads(leads.filter((l) => !cleanSizeBand(l.engagerEmployees) && l.engagerLinkedinUrl && companyDomainOf(l)));
+  const stillLeads = uniqueCompanyLookupLeads(
+    leads.filter((l) => !cleanSizeBand(l.engagerEmployees) && (companyDomainOf(l) || l.engagerCompany || l.engagerLinkedinUrl)),
+  );
   log.info("waterfall company queue", { unique_companies: stillLeads.length, batches: Math.ceil(stillLeads.length / BATCH) });
 
   await wf.health();
@@ -207,15 +248,8 @@ async function main() {
     const jobId = started?.job_id || started?.id || started?.jobId || null;
     if (jobId) await wf.waitForJob(jobId, { timeoutMs: 50 * 60_000, pollMs: 15_000 });
     const after = await readWaterfallCompanies(supabase, config.waterfallClientTag, [], payload);
-    let hits = 0;
-    const found = new Map();
-    for (const company of after) {
-      if (company?.domain) found.set(String(company.domain).toLowerCase(), company);
-    }
-    for (const lead of leads) {
-      const hit = found.get(companyDomainOf(lead));
-      if (hit && applyWaterfallHit(lead, hit)) hits += 1;
-    }
+    const contacts = await readWaterfallContacts(supabase, config.waterfallClientTag, payload);
+    const hits = applyHits(leads, after, contacts);
     const wrote = await persistSized(supabase, rows, leads);
     log.info("waterfall company done", {
       batch: batchNo,
