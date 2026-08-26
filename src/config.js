@@ -66,6 +66,7 @@ export function loadConfig(env = process.env, argv = process.argv) {
       "https://verifyfall-production.up.railway.app/mcp",
     ),
     waterfallClientTag: str(env, "WATERFALL_CLIENT_TAG", "salesglider"),
+    waterfallMaxTier: str(env, "WATERFALL_MAX_TIER", "leadmagic"),
     smartleadApiKey: str(env, "SMARTLEAD_API_KEY"),
     smartleadBaseUrl: str(env, "SMARTLEAD_BASE_URL", "https://server.smartlead.ai/api/v1").replace(
       /\/$/,
