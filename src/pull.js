@@ -82,7 +82,7 @@ export async function runPull({ supabase, config, getleads, apify, waterfall, we
 
   const company = await resolveCompanies({
     leads: toResolve,
-    apify,
+    waterfall,
     config,
     spend,
     supabase,

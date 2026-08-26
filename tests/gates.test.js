@@ -4,7 +4,7 @@ import { createSmartlead, extractUploadCount, formatLocation, leadInCampaign, to
 import { classifyFromSets, estimateVerifierCents, verifyRows } from "../src/gates/verify.js";
 import { applyInboxDedupe } from "../src/gates/dedupe.js";
 import { applySuppression } from "../src/gates/suppression.js";
-import { chunk, groupByCampaign, importStaged } from "../src/gates/import.js";
+import { chunk, groupByCampaign, importChunkAccepted, importStaged } from "../src/gates/import.js";
 import { toStagingRow } from "../src/gates/stage.js";
 import { wouldExceedCap } from "../src/spend.js";
 import { sanitizeLogExtra } from "../src/logger.js";
@@ -117,6 +117,41 @@ describe("verifier mapping", () => {
     assert.ok(logs[0].would_cost_cents > 400);
   });
 
+  it("can ignore the spend cap for an authorized verify one-shot", async () => {
+    let started = 0;
+    const result = await verifyRows({
+      rows: [row()],
+      config: { monthlySpendCapCents: 1, mvCentsPerCredit: 300, n2bCentsPerCheck: 0.8 },
+      spendCents: 100,
+      ignoreCap: true,
+      verifier: {
+        async start() {
+          started += 1;
+          return { run_id: "11111111-1111-1111-1111-111111111111" };
+        },
+        async waitForRun() {
+          return { status: "completed", mv_credits_used: 1, n2b_credits_used: 0 };
+        },
+        async results() {
+          return { downloads: { sendable_url: "https://files.test/sendable.csv", rejected_url: "https://files.test/rejected.csv" } };
+        },
+      },
+      fetchImpl: async (url) => {
+        if (String(url).includes("sendable")) return { text: async () => "Email\npat@acme.com\n" };
+        return { text: async () => "Email\n" };
+      },
+      putCsv: async (id) => `https://files.test/feeds/${id}.csv`,
+      publicBaseUrl: "https://pipeline.test",
+      onCapHit: async () => {
+        throw new Error("should not hit cap");
+      },
+      charge: async () => ({ spendCents: 100 }),
+    });
+    assert.equal(started, 1);
+    assert.equal(result.stats.cap_hit, false);
+    assert.equal(result.stats.verified, 1);
+  });
+
   it("maps verifier CSVs and charges billed credits", async () => {
     const charges = [];
     const feeds = new Map();
@@ -220,6 +255,35 @@ describe("stage + import", () => {
   it("does not treat already_added as extra credit toward success", () => {
     assert.equal(extractUploadCount({ upload_count: 2, already_added_to_campaign: 2 }), 2);
     assert.equal(extractUploadCount({ added_count: 2 }), null);
+  });
+
+  it("accepts a chunk when upload_count or already_added covers the batch", () => {
+    assert.equal(importChunkAccepted({ uploadCount: 3 }, 3), true);
+    assert.equal(importChunkAccepted({ uploadCount: 1, body: { already_added_to_campaign: 2 } }, 3), true);
+    assert.equal(importChunkAccepted({ uploadCount: 0, body: { already_added_to_campaign: 3 } }, 3), true);
+    assert.equal(importChunkAccepted({ uploadCount: 1 }, 3), false);
+  });
+
+  it("retries HTTP 429 then imports the chunk", async () => {
+    let n = 0;
+    const smartlead = {
+      async addLeads(_id, list) {
+        n += 1;
+        if (n < 2) throw new Error("HTTP 429 POST");
+        return { uploadCount: list.length, body: { upload_count: list.length } };
+      },
+    };
+    const result = await importStaged({
+      rows: [row({ status: "staged", email: "pat@acme.com", first_name: "Pat" })],
+      smartlead,
+      chunkSize: 200,
+      retry429: 2,
+      retryDelayMs: 1,
+      pauseMs: 0,
+    });
+    assert.equal(n, 2);
+    assert.equal(result.imported.length, 1);
+    assert.equal(result.errors.length, 0);
   });
 
   it("checks Smartlead membership from lead_campaign_data", () => {

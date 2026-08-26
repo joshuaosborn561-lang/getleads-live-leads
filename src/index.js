@@ -1,6 +1,5 @@
 import http from "node:http";
 import { pathToFileURL } from "node:url";
-import { createApify } from "./clients/apify.js";
 import { createGetleads } from "./clients/getleads.js";
 import { createSmartlead } from "./clients/smartlead.js";
 import { createVerifier } from "./clients/verifier.js";
@@ -97,7 +96,6 @@ export async function main(env = process.env, argv = process.argv) {
     supabase,
     config,
     getleads: createGetleads(config),
-    apify: createApify(config),
     waterfall: createWaterfall(config),
     verifier: createVerifier(config),
     webhook: createWebhook(config),

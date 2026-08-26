@@ -1,4 +1,3 @@
-import { createApify } from "../src/clients/apify.js";
 import { createSmartlead } from "../src/clients/smartlead.js";
 import { createVerifier } from "../src/clients/verifier.js";
 import { createWaterfall } from "../src/clients/waterfall.js";
@@ -32,7 +31,6 @@ async function main() {
   const deps = {
     supabase,
     config,
-    apify: createApify(config),
     waterfall: createWaterfall(config),
     verifier: createVerifier(config),
     smartlead: createSmartlead(config),
