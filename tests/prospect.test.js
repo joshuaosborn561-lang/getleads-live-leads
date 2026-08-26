@@ -257,12 +257,14 @@ describe("pull cursor + webhook map", () => {
     assert.equal(companyDomainOf(person), "acme.com");
 
     const sent = [];
+    let jobStarted = false;
     const result = await resolveEmails({
       leads: [person],
       waterfall: {
         async health() { return { ok: true }; },
         async ensureClient() { return { ok: true }; },
         async enrich({ rows }) {
+          jobStarted = true;
           sent.push(rows);
           return { job_id: "job-1" };
         },
@@ -278,20 +280,22 @@ describe("pull cursor + webhook map", () => {
                 in(_col, values) {
                   if (table.endsWith("_wf_contacts")) {
                     return {
-                      data: [
-                        {
-                          domain: "acme.com",
-                          first_name: "Pat",
-                          last_name: "Lee",
-                          email: "pat@acme.com",
-                          source_tier: "aiark",
-                          linkedin_url: "https://www.linkedin.com/in/pat-lee",
-                        },
-                      ],
+                      data: jobStarted
+                        ? [
+                            {
+                              domain: "acme.com",
+                              first_name: "Pat",
+                              last_name: "Lee",
+                              email: "pat@acme.com",
+                              source_tier: "aiark",
+                              linkedin_url: "https://www.linkedin.com/in/pat-lee",
+                            },
+                          ]
+                        : [],
                       error: null,
                     };
                   }
-                  return { data: [{ domain: values[0], company_name: "Acme", employee_range: null }], error: null };
+                  return { data: values?.[0] ? [{ domain: values[0], company_name: "Acme", employee_range: null }] : [], error: null };
                 },
               };
             },
@@ -327,6 +331,54 @@ describe("pull cursor + webhook map", () => {
     assert.equal(lead.engagerEmail, "pat@acme.com");
     assert.equal(lead.companyDomain, "acme.com");
     assert.equal(lead.companySource, "aiark");
+  });
+
+  it("sends one waterfall row per LinkedIn person", async () => {
+    const sent = [];
+    await resolveEmails({
+      leads: [
+        {
+          engagerFirstName: "Pat",
+          engagerLastName: "Lee",
+          engagerCompany: "Acme",
+          engagerEmployees: "11 to 50",
+          engagerEmail: "x",
+          engagerLinkedinUrl: "https://www.linkedin.com/in/pat-lee",
+          companyDomain: "acme.com",
+        },
+        {
+          engagerFirstName: "Pat",
+          engagerLastName: "Lee",
+          engagerCompany: "Acme",
+          engagerEmployees: "11 to 50",
+          engagerEmail: "x",
+          engagerLinkedinUrl: "https://www.linkedin.com/in/pat-lee",
+          companyDomain: "acme.com",
+        },
+      ],
+      waterfall: {
+        async health() { return { ok: true }; },
+        async ensureClient() { return { ok: true }; },
+        async enrich({ rows }) {
+          sent.push(rows);
+          return { job_id: "job-2" };
+        },
+        async waitForJob() { return { status: "completed" }; },
+      },
+      config: { emailWaterfallMcpUrl: "https://example.test/mcp", waterfallClientTag: "salesglider", waterfallCentsPerRow: 15 },
+      spend: { spendCents: 0 },
+      supabase: {
+        from() {
+          return { select() { return { in() { return { data: [], error: null }; } }; } };
+        },
+        async rpc() {
+          return { data: { month_key: "2026-08", apify_cents: 0, waterfall_cents: 15, verifier_cents: 0 }, error: null };
+        },
+      },
+      log: { info() {}, warn() {} },
+      cap: 5000,
+    });
+    assert.equal(sent[0].length, 1);
   });
 
   it("re-gates parked placeholder bands as missing size, not dq_size", () => {

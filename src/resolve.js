@@ -29,12 +29,37 @@ export function companyDomainOf(lead) {
   return "";
 }
 
+export function waterfallPersonKey(lead) {
+  const slug = linkedinSlug(lead.engagerLinkedinUrl);
+  const hash = hashedProfileId(lead.engagerLinkedinUrl);
+  if (slug) return `li:${slug}`;
+  if (hash) return `li:${hash}`;
+  const domain = companyDomainOf(lead);
+  const first = String(lead.engagerFirstName || "").trim().toLowerCase();
+  const last = String(lead.engagerLastName || "").trim().toLowerCase();
+  if (domain && first) return `${domain}|${first}|${last}`;
+  return "";
+}
+
+export function uniqueWaterfallLeads(leads) {
+  const seen = new Set();
+  const out = [];
+  for (const lead of leads) {
+    const key = waterfallPersonKey(lead);
+    if (key && seen.has(key)) continue;
+    if (key) seen.add(key);
+    out.push(lead);
+  }
+  return out;
+}
+
 export function shouldWaterfall(lead) {
   const hasPerson =
     Boolean(lead.engagerLinkedinUrl) ||
     Boolean(lead.engagerFirstName || lead.engagerFullName);
   if (!hasPerson) return false;
-  return needsEmail(lead) || needsCompany(lead) || !companyDomainOf(lead);
+  if (needsEmail(lead)) return true;
+  return !companyDomainOf(lead) && Boolean(lead.engagerLinkedinUrl);
 }
 
 const FREEMAIL = new Set([
@@ -239,7 +264,7 @@ export async function resolveCompanySizes({ leads, apify, config, spend, supabas
 
 export function waterfallRowOf(lead) {
   return {
-    domain: companyDomainOf(lead) || undefined,
+    domain: companyDomainOf(lead) || "",
     company_name: lead.engagerCompany || undefined,
     first_name: lead.engagerFirstName || String(lead.engagerFullName || "").split(/\s+/)[0] || undefined,
     last_name: lead.engagerLastName || undefined,
@@ -289,7 +314,7 @@ export async function resolveEmails({ leads, waterfall, config, spend, supabase,
     job_id: null,
   };
   const out = leads.map((l) => ({ ...l }));
-  const missing = out.filter(shouldWaterfall);
+  const missing = uniqueWaterfallLeads(out.filter(shouldWaterfall));
   if (!missing.length) return { leads: out, stats, spend };
 
   let current = spend;
@@ -307,6 +332,26 @@ export async function resolveEmails({ leads, waterfall, config, spend, supabase,
   }
   if (!rows.length) return { leads: out, stats, spend: current };
   if (!config.emailWaterfallMcpUrl) return { leads: out, stats, spend: current };
+
+  try {
+    const existing = await readWaterfallContacts(supabase, config.waterfallClientTag, rows);
+    const existingCompanies = await readWaterfallCompanies(supabase, config.waterfallClientTag, existing, rows);
+    applyHitsToLeads(out, existing, existingCompanies, stats);
+  } catch {
+    // Table read is best-effort; still try a paid job if contacts aren't there yet.
+  }
+  const still = [];
+  const stillLeads = [];
+  for (const lead of indexed) {
+    if (!needsEmail(lead) && companyDomainOf(lead)) continue;
+    still.push(waterfallRowOf(lead));
+    stillLeads.push(lead);
+  }
+  if (!still.length) return { leads: out, stats, spend: current };
+  rows.length = 0;
+  rows.push(...still);
+  indexed.length = 0;
+  indexed.push(...stillLeads);
 
   const estimate = rows.length * config.waterfallCentsPerRow;
   if (wouldExceedCap(current.spendCents, estimate, cap)) {
@@ -339,21 +384,7 @@ export async function resolveEmails({ leads, waterfall, config, spend, supabase,
       matched: contacts.length,
       spend_cents: cents,
     });
-    const byKey = indexContacts(contacts);
-    const byDomain = indexCompanies(companies);
-    for (const lead of indexed) {
-      const domain = companyDomainOf(lead);
-      const first = (lead.engagerFirstName || "").toLowerCase();
-      const last = (lead.engagerLastName || "").toLowerCase();
-      const li = contactLookupKeys(lead);
-      const hit =
-        li.map((key) => byKey.get(key)).find(Boolean) ||
-        byKey.get(`${domain}|${first}|${last}`) ||
-        byKey.get(`${domain}|${first}|`) ||
-        null;
-      const company = byDomain.get(domain) || byDomain.get(hit?.domain || "") || null;
-      if (applyWaterfallHit(lead, hit ? { ...hit, ...company } : company)) stats.resolved += 1;
-    }
+    applyHitsToLeads(out, contacts, companies, stats);
   } catch (err) {
     stats.errors += rows.length;
     log.warn("waterfall failed", { error: String(err.message || err).slice(0, 200), count: rows.length });
@@ -363,6 +394,17 @@ export async function resolveEmails({ leads, waterfall, config, spend, supabase,
   }
 
   return { leads: out, stats, spend: current };
+}
+
+async function selectInChunks(supabase, table, columns, column, values) {
+  const unique = [...new Set(values.filter(Boolean))];
+  const out = [];
+  for (const part of chunk(unique, 40)) {
+    const { data, error } = await supabase.from(table).select(columns).in(column, part);
+    if (error) throw new Error(`${table}: ${error.message}`);
+    out.push(...(data || []));
+  }
+  return out;
 }
 
 export async function readWaterfallContacts(supabase, clientTag, rows) {
@@ -380,22 +422,9 @@ export async function readWaterfallContacts(supabase, clientTag, rows) {
       out.push(row);
     }
   };
-  if (domains.length) {
-    const { data, error } = await supabase
-      .from(table)
-      .select("domain, first_name, last_name, email, source_tier, linkedin_url")
-      .in("domain", domains);
-    if (error) throw new Error(`waterfall contacts: ${error.message}`);
-    add(data);
-  }
-  if (urls.length) {
-    const { data, error } = await supabase
-      .from(table)
-      .select("domain, first_name, last_name, email, source_tier, linkedin_url")
-      .in("linkedin_url", urls);
-    if (error) throw new Error(`waterfall contacts: ${error.message}`);
-    add(data);
-  }
+  const columns = "domain, first_name, last_name, email, source_tier, linkedin_url";
+  if (domains.length) add(await selectInChunks(supabase, table, columns, "domain", domains));
+  if (urls.length) add(await selectInChunks(supabase, table, columns, "linkedin_url", urls));
   return out.filter((r) => isEmail(r.email) || r.linkedin_url);
 }
 
@@ -410,12 +439,24 @@ export async function readWaterfallCompanies(supabase, clientTag, contacts, rows
     ),
   ];
   if (!domains.length) return [];
-  const { data, error } = await supabase
-    .from(table)
-    .select("domain, company_name, employee_range, website")
-    .in("domain", domains);
-  if (error) throw new Error(`waterfall companies: ${error.message}`);
-  return data || [];
+  return selectInChunks(supabase, table, "domain, company_name, employee_range, website", "domain", domains);
+}
+
+function applyHitsToLeads(leads, contacts, companies, stats) {
+  const byKey = indexContacts(contacts);
+  const byDomain = indexCompanies(companies);
+  for (const lead of leads) {
+    const domain = companyDomainOf(lead);
+    const first = (lead.engagerFirstName || "").toLowerCase();
+    const last = (lead.engagerLastName || "").toLowerCase();
+    const hit =
+      contactLookupKeys(lead).map((key) => byKey.get(key)).find(Boolean) ||
+      byKey.get(`${domain}|${first}|${last}`) ||
+      byKey.get(`${domain}|${first}|`) ||
+      null;
+    const company = byDomain.get(domain) || byDomain.get(hit?.domain || "") || null;
+    if (applyWaterfallHit(lead, hit ? { ...hit, ...company } : company)) stats.resolved += 1;
+  }
 }
 
 function contactLookupKeys(lead) {
