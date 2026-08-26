@@ -29,6 +29,7 @@ export function emptyCounts() {
     cap_hit: false,
     run_id: null,
     spend_cents: 0,
+    promoted: 0,
   };
 }
 
@@ -47,10 +48,21 @@ export async function applyPatches(supabase, items) {
   return n;
 }
 
+export async function promoteStampedPending(supabase) {
+  const rows = await fetchByStatus(supabase, ["pending_verification"]);
+  const ready = rows.filter((r) => r.verification_source === "email-verifier-progression");
+  if (!ready.length) return 0;
+  return markByDedupeKeys(supabase, ready.map((r) => r.dedupe_key), {
+    status: "verified",
+    routing_note: null,
+  });
+}
+
 export async function runSweep({ supabase, config, verifier, smartlead, log, fetchImpl }) {
   const counts = emptyCounts();
 
   counts.reclaimed = await reclaimStale(supabase, config.staleVerifyingMinutes);
+  counts.promoted = await promoteStampedPending(supabase);
   const claimed = await claimPending(supabase, config.sweepLimit);
   counts.claimed = claimed.length;
 
