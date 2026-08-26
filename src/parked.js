@@ -66,7 +66,7 @@ export async function runParkedResolution({ supabase, config, apify, waterfall, 
 
   const company = await resolveCompanies({
     leads,
-    apify,
+    waterfall,
     config,
     spend,
     supabase,
@@ -106,6 +106,7 @@ export async function runParkedResolution({ supabase, config, apify, waterfall, 
     const patch = {
       engager_email: realEmail(lead?.engagerEmail, row.engager_email) || row.engager_email,
       engager_company: lead?.engagerCompany || row.engager_company,
+      engager_employees: lead?.engagerEmployees || row.engager_employees,
       engager_job_title: lead?.engagerJobTitle || row.engager_job_title,
       engager_city: lead?.engagerCity || row.engager_city,
       engager_country: lead?.engagerCountry || row.engager_country,

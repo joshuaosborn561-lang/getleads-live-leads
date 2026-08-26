@@ -201,4 +201,56 @@ describe("runSweep", () => {
     assert.equal(smartleadCalls[0].id, 3847939);
     assert.ok(!JSON.stringify(smartleadCalls).includes("/start"));
   });
+
+  it("stages already-stamped pending rows without another verifier run", async () => {
+    let started = 0;
+    const { supabase, store } = createFake({
+      claimed: [
+        {
+          id: 3,
+          dedupe_key: "stamped",
+          status: "pending_verification",
+          verification_source: "email-verifier-progression",
+          engager_email: "ok@acme.com",
+          first_name_n: "Ok",
+          engager_last_name: "Lead",
+          company_n: "Acme",
+          campaign_id: 3847939,
+        },
+      ],
+    });
+    const counts = await runSweep({
+      supabase,
+      config: {
+        sweepLimit: 500,
+        staleVerifyingMinutes: 45,
+        monthlySpendCapCents: 1,
+        mvCentsPerCredit: 0.178,
+        n2bCentsPerCheck: 0.8,
+        importChunkSize: 200,
+        publicBaseUrl: "https://pipeline.test",
+      },
+      verifier: {
+        async start() {
+          started += 1;
+          throw new Error("should not verify again");
+        },
+      },
+      smartlead: {
+        async campaignHasEmail() {
+          return false;
+        },
+        async addLeads(id, list) {
+          return { uploadCount: list.length };
+        },
+      },
+      log: { info() {}, warn() {}, error() {} },
+    });
+    assert.equal(started, 0);
+    assert.equal(counts.promoted, 1);
+    assert.equal(counts.claimed, 0);
+    assert.equal(counts.staged, 1);
+    assert.equal(counts.imported, 1);
+    assert.equal(store.inbox.find((r) => r.dedupe_key === "stamped").status, "imported");
+  });
 });

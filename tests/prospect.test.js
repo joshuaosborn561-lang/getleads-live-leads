@@ -22,6 +22,8 @@ import {
   resolveCompanies,
   resolveEmails,
   shouldWaterfall,
+  uniqueCompanyLeads,
+  uniqueCompanyLookupLeads,
 } from "../src/resolve.js";
 import { mapApifyCompany, mapApifyProfile } from "../src/clients/apify.js";
 import { nextParkedStatus } from "../src/parked.js";
@@ -210,8 +212,35 @@ describe("pull cursor + webhook map", () => {
     );
   });
 
-  it("does not scrape Apify when a person LinkedIn URL is present", async () => {
-    const calls = [];
+  it("keeps one company lookup per domain", () => {
+    const leads = uniqueCompanyLeads([
+      { lead_id: "a", companyDomain: "a.com", engagerLinkedinUrl: "https://linkedin.com/in/a" },
+      { lead_id: "b", companyDomain: "a.com", engagerLinkedinUrl: "https://linkedin.com/in/b" },
+      { lead_id: "c", companyDomain: "b.com" },
+    ]);
+    assert.equal(leads.length, 2);
+    assert.equal(leads[0].lead_id, "a");
+    assert.equal(leads[1].lead_id, "c");
+  });
+
+  it("keeps one company lookup per domain or company name", () => {
+    const leads = uniqueCompanyLookupLeads([
+      { lead_id: "a", engagerCompany: "Acme Inc" },
+      { lead_id: "b", engagerCompany: "Acme" },
+      { lead_id: "c", companyDomain: "beta.com", engagerCompany: "Beta" },
+      { lead_id: "d", engagerCompany: "Beta LLC" },
+      { lead_id: "e", engagerCompany: "Gamma" },
+    ]);
+    assert.equal(leads.length, 3);
+    assert.equal(leads[0].lead_id, "c");
+    assert.ok(leads.some((l) => l.lead_id === "a"));
+    assert.ok(leads.some((l) => l.lead_id === "e"));
+    assert.ok(!leads.some((l) => l.lead_id === "d"));
+  });
+
+  it("fills company size from waterfall LinkedIn lookup and never calls Apify", async () => {
+    const apifyCalls = [];
+    const sent = [];
     const result = await resolveCompanies({
       leads: [
         {
@@ -219,26 +248,116 @@ describe("pull cursor + webhook map", () => {
           engagerCompany: "Acme",
           engagerEmployees: null,
           engagerLinkedinUrl: "https://www.linkedin.com/in/pat-lee",
+          companyDomain: "acme.com",
+        },
+        {
+          dedupeKey: "y",
+          engagerCompany: "Acme",
+          engagerEmployees: null,
+          engagerLinkedinUrl: "https://www.linkedin.com/in/other",
+          companyDomain: "acme.com",
         },
       ],
       apify: {
-        async scrapeProfiles(urls) {
-          calls.push(urls.length);
-          return { items: [], usageTotalUsd: 0, runId: "run1" };
+        async scrapeProfiles(urls) { apifyCalls.push(urls.length); return { items: [] }; },
+        async scrapeCompanies(urls) { apifyCalls.push(urls.length); return { items: [] }; },
+      },
+      waterfall: {
+        async health() { return { ok: true }; },
+        async ensureClient() { return { ok: true }; },
+        async enrich(payload) {
+          sent.push(payload);
+          return { job_id: "wf-co-1" };
         },
-        async scrapeCompanies(urls) {
-          calls.push(urls.length);
-          return { items: [], usageTotalUsd: 0, runId: "c1" };
+        async waitForJob() { return { status: "completed" }; },
+      },
+      config: { emailWaterfallMcpUrl: "https://example.test/mcp", waterfallClientTag: "salesglider", waterfallMaxTier: "leadmagic" },
+      spend: { spendCents: 0 },
+      supabase: {
+        from() {
+          return {
+            select() {
+              return {
+                in(_col, values) {
+                  return {
+                    data: [{ domain: "acme.com", company_name: "Acme", employee_range: "11 to 50" }],
+                    error: null,
+                  };
+                },
+              };
+            },
+          };
+        },
+        async rpc() {
+          return { data: { month_key: "2026-08", apify_cents: 0, waterfall_cents: 0, verifier_cents: 0 }, error: null };
         },
       },
-      config: { apifyToken: "t", apifyBatchSize: 50, apifyCentsPerProfile: 0.4 },
-      spend: { spendCents: 0 },
-      supabase: { async rpc() { return { data: { month_key: "2026-08", apify_cents: 0, waterfall_cents: 0, verifier_cents: 0 }, error: null }; } },
       log: { info() {}, warn() {} },
       cap: 500,
     });
-    assert.equal(calls.length, 0);
-    assert.ok(result.stats.skipped_aiark >= 1);
+    assert.equal(apifyCalls.length, 0);
+    assert.equal(result.leads[0].engagerEmployees, "11 to 50");
+    assert.equal(result.leads[1].engagerEmployees, "11 to 50");
+    if (sent.length) {
+      assert.equal(sent[0].maxTier, "leadmagic");
+      assert.equal(sent[0].rows.length, 1);
+    }
+  });
+
+  it("starts a waterfall company job when size is still missing and never calls Apify", async () => {
+    const apifyCalls = [];
+    const sent = [];
+    const result = await resolveCompanies({
+      leads: [
+        {
+          dedupeKey: "x",
+          engagerCompany: "Acme",
+          engagerEmployees: null,
+          engagerLinkedinUrl: "https://www.linkedin.com/in/pat-lee",
+          companyDomain: "acme.com",
+        },
+      ],
+      apify: {
+        async scrapeProfiles(urls) { apifyCalls.push(urls.length); return { items: [] }; },
+        async scrapeCompanies(urls) { apifyCalls.push(urls.length); return { items: [] }; },
+      },
+      waterfall: {
+        async health() { return { ok: true }; },
+        async ensureClient() { return { ok: true }; },
+        async enrich(payload) {
+          sent.push(payload);
+          return { job_id: "wf-co-2" };
+        },
+        async waitForJob() { return { status: "completed" }; },
+      },
+      config: { emailWaterfallMcpUrl: "https://example.test/mcp", waterfallClientTag: "salesglider", waterfallMaxTier: "leadmagic" },
+      spend: { spendCents: 0 },
+      supabase: {
+        from() {
+          return {
+            select() {
+              return {
+                in() {
+                  return { data: [{ domain: "acme.com", company_name: "Acme", employee_range: null }], error: null };
+                },
+              };
+            },
+          };
+        },
+        async rpc() {
+          return { data: { month_key: "2026-08", apify_cents: 0, waterfall_cents: 0, verifier_cents: 0 }, error: null };
+        },
+      },
+      log: { info() {}, warn() {} },
+      cap: 500,
+    });
+    assert.equal(apifyCalls.length, 0);
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0].maxTier, "leadmagic");
+    assert.equal(sent[0].need, "email");
+    assert.equal(sent[0].rows.length, 1);
+    assert.equal(sent[0].rows[0].linkedin_url, "https://www.linkedin.com/in/pat-lee");
+    assert.equal(result.stats.job_id, "wf-co-2");
   });
 
   it("treats junk getleads emails as missing and waterfalls with an existing Apify domain", async () => {
@@ -315,6 +434,15 @@ describe("pull cursor + webhook map", () => {
     assert.equal(sent[0][0].linkedin_url, "https://www.linkedin.com/in/pat-lee");
     assert.equal(result.leads[0].engagerEmail, "pat@acme.com");
     assert.equal(result.stats.resolved, 1);
+  });
+
+  it("copies company size from a waterfall company hit", () => {
+    const lead = { engagerCompany: "Acme", companyDomain: "acme.com" };
+    assert.equal(
+      applyWaterfallHit(lead, { domain: "acme.com", employee_count: 42, employee_count_range: { start: 11, end: 50 } }),
+      true,
+    );
+    assert.equal(lead.engagerEmployees, "11 to 50");
   });
 
   it("can match a waterfall contact by LinkedIn URL and copy the work-email domain", () => {

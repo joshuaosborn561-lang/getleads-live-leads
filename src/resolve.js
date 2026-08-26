@@ -1,6 +1,7 @@
 import { chunk } from "./clients/webhook.js";
 import { applyEmploymentCurrency } from "./gates/prospect.js";
 import {
+  bandFromEmployeeCount,
   cleanSizeBand,
   companyLinkedinSlug,
   domainFromWebsite,
@@ -135,131 +136,140 @@ export function applyProfileItem(lead, item) {
   return changed;
 }
 
-export async function resolveCompanies({ leads, apify, config, spend, supabase, log, cap }) {
-  const stats = { attempted: 0, resolved: 0, skipped_cap: 0, skipped_aiark: 0, errors: 0, spend_cents: 0 };
-  const out = leads.map((l) => ({ ...l }));
-  // AI Ark (via waterfall + person LinkedIn URL) owns company/domain lookup now.
-  // Keep any domain Apify already stored; do not scrape those people again.
-  stats.skipped_aiark = out.filter((l) => l.engagerLinkedinUrl && (needsCompany(l) || !companyDomainOf(l))).length;
-  const missing = out.filter((l) => needsCompany(l) && !l.engagerLinkedinUrl);
-  if (!missing.length) return { leads: out, stats, spend };
-  if (!config.apifyToken && !apify?.scrapeProfiles) return { leads: out, stats, spend };
-  if (!config.apifyToken) {
-    log.warn("APIFY_TOKEN missing; skipping company resolution", { remaining: missing.length });
-    return { leads: out, stats, spend };
+export function uniqueCompanyLeads(leads) {
+  const seen = new Set();
+  const out = [];
+  for (const lead of leads) {
+    const domain = companyDomainOf(lead);
+    const key = domain || waterfallPersonKey(lead);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(lead);
   }
+  return out;
+}
+
+/** One lookup per domain, else one per normalized company name. */
+export function uniqueCompanyLookupLeads(leads) {
+  const ranked = [...leads].sort((a, b) => Number(Boolean(companyDomainOf(b))) - Number(Boolean(companyDomainOf(a))));
+  const seen = new Set();
+  const out = [];
+  for (const lead of ranked) {
+    const domain = companyDomainOf(lead);
+    const name = (normCompany(lead.engagerCompany) || "").toLowerCase();
+    const keys = [domain && `d:${domain}`, name && `n:${name}`].filter(Boolean);
+    if (!keys.length || keys.some((key) => seen.has(key))) {
+      for (const key of keys) seen.add(key);
+      continue;
+    }
+    for (const key of keys) seen.add(key);
+    out.push(lead);
+  }
+  return out;
+}
+
+export function sizeFromCompanyHit(hit) {
+  if (!hit) return "";
+  return (
+    cleanSizeBand(hit.employee_range) ||
+    cleanSizeBand(hit.employees) ||
+    cleanSizeBand(hit.company_size) ||
+    bandFromEmployeeCount(
+      hit.employee_count ?? hit.employeeCount,
+      hit.employee_count_range ?? hit.employeeCountRange,
+    ) ||
+    ""
+  );
+}
+
+/** Company/size comes from getleads, AI Ark, or LeadMagic via waterfall. Never Apify. */
+export async function resolveCompanies({ leads, waterfall, config, spend, supabase, log, cap }) {
+  const stats = { attempted: 0, resolved: 0, skipped_cap: 0, skipped_aiark: 0, errors: 0, spend_cents: 0, job_id: null };
+  const out = leads.map((l) => ({ ...l }));
+  const need = out.filter((l) => needsCompany(l) && (l.engagerLinkedinUrl || companyDomainOf(l)));
+  if (!need.length) return { leads: out, stats, spend };
 
   let current = spend;
-  const remainingBudget = () => cap - current.spendCents;
-  const canAfford = (n) =>
-    !wouldExceedCap(current.spendCents, n * config.apifyCentsPerProfile, cap);
-
-  for (const part of chunk(missing, config.apifyBatchSize)) {
-    if (!canAfford(part.length) || remainingBudget() <= 0) {
-      stats.skipped_cap += part.length;
-      await logCap(log, "apify", current, cap, part.length * config.apifyCentsPerProfile);
-      break;
-    }
-    stats.attempted += part.length;
-    try {
-      const result = await apify.scrapeProfiles(part.map((l) => l.engagerLinkedinUrl), {
-        maxTotalChargeUsd: Math.max(0.05, (part.length * config.apifyCentsPerProfile) / 100 + 0.1),
-      });
-      const cents = result.usageTotalUsd
-        ? Number(result.usageTotalUsd) * 100
-        : part.length * config.apifyCentsPerProfile;
-      if (cents > 0) {
-        current = await addSpend(supabase, "apify", cents);
-        stats.spend_cents += cents;
-      }
-      log.info("apify run complete", {
-        run_id: result.runId,
-        count: part.length,
-        resolved_items: result.items.length,
-        spend_cents: cents,
-      });
-      for (const lead of part) {
-        const item = matchApifyItem(lead, result.items);
-        if (applyProfileItem(lead, item)) stats.resolved += 1;
-      }
-    } catch (err) {
-      stats.errors += part.length;
-      for (const lead of part) {
-        lead.resolveError = String(err.message || "apify failed").slice(0, 500);
-      }
-    }
+  try {
+    const existing = await readWaterfallCompanies(
+      supabase,
+      config.waterfallClientTag,
+      [],
+      uniqueCompanyLeads(need).map(waterfallRowOf),
+    );
+    applyCompanyHits(out, existing, stats);
+  } catch {
+    // Best-effort table read; still try a waterfall job if size is missing.
   }
 
-  if (apify?.scrapeCompanies) {
-    current = await resolveCompanySizes({
-      leads: out,
-      apify,
-      config,
-      spend: current,
+  const still = uniqueCompanyLeads(
+    out.filter((l) => needsCompany(l) && l.engagerLinkedinUrl && companyDomainOf(l)),
+  );
+  if (!still.length) return { leads: out, stats, spend: current };
+  if (!config.emailWaterfallMcpUrl || !waterfall?.enrich) {
+    log.info("company size skipped; waterfall not configured", { remaining: still.length });
+    return { leads: out, stats, spend: current };
+  }
+
+  stats.attempted += still.length;
+  try {
+    if (waterfall.health) await waterfall.health();
+    if (waterfall.ensureClient) await waterfall.ensureClient();
+    const started = await waterfall.enrich({
+      rows: still.map(waterfallRowOf),
+      need: "email",
+      requireTitleMatch: false,
+      background: true,
+      maxTier: config.waterfallMaxTier || "leadmagic",
+    });
+    const jobId = started?.job_id || started?.id || started?.jobId || null;
+    stats.job_id = jobId;
+    if (jobId && waterfall.waitForJob) {
+      await waterfall.waitForJob(jobId, { timeoutMs: 50 * 60_000 });
+    }
+    const companies = await readWaterfallCompanies(
       supabase,
-      log,
-      cap,
-      stats,
+      config.waterfallClientTag,
+      [],
+      still.map(waterfallRowOf),
+    );
+    applyCompanyHits(out, companies, stats);
+    const cents = Number(started?.cost_cents || started?.spend_cents || 0);
+    if (cents > 0) {
+      current = await addSpend(supabase, "waterfall", cents);
+      stats.spend_cents += cents;
+    }
+    log.info("waterfall company job complete", {
+      job_id: jobId,
+      count: still.length,
+      with_range: companies.filter((c) => sizeFromCompanyHit(c)).length,
+      spend_cents: cents,
+    });
+  } catch (err) {
+    stats.errors += still.length;
+    log.warn("waterfall company failed", {
+      error: String(err.message || err).slice(0, 200),
+      count: still.length,
     });
   }
-
   return { leads: out, stats, spend: current };
 }
 
-export async function resolveCompanySizes({ leads, apify, config, spend, supabase, log, cap, stats }) {
-  let current = spend;
-  const need = leads.filter(
-    (l) => !cleanSizeBand(l.engagerEmployees) && l.companyLinkedinUrl && !l.engagerLinkedinUrl,
-  );
-  if (!need.length) return current;
-  const urls = [...new Set(need.map((l) => l.companyLinkedinUrl).filter(Boolean))];
-  const estimate = urls.length * config.apifyCentsPerProfile;
-  if (wouldExceedCap(current.spendCents, estimate, cap)) {
-    stats.skipped_cap += need.length;
-    await logCap(log, "apify-company", current, cap, estimate);
-    return current;
-  }
+export async function resolveCompanySizes({ leads, supabase, config, spend, stats }) {
+  const need = uniqueCompanyLeads(leads.filter((l) => !cleanSizeBand(l.engagerEmployees)));
+  if (!need.length) return spend;
   try {
-    const result = await apify.scrapeCompanies(urls, {
-      maxTotalChargeUsd: Math.max(0.05, estimate / 100 + 0.1),
-    });
-    const cents = result.usageTotalUsd
-      ? Number(result.usageTotalUsd) * 100
-      : urls.length * config.apifyCentsPerProfile;
-    if (cents > 0) {
-      current = await addSpend(supabase, "apify", cents);
-      stats.spend_cents += cents;
-    }
-    log.info("apify company run complete", {
-      run_id: result.runId,
-      count: urls.length,
-      resolved_items: result.items.length,
-      spend_cents: cents,
-    });
-    for (const lead of need) {
-      const item = matchCompanyItem(lead, result.items);
-      if (!item) continue;
-      if (item.employees) {
-        lead.engagerEmployees = item.employees;
-        stats.resolved += 1;
-      }
-      if (item.website) {
-        lead.engagerCompanyWebsite = item.website;
-        lead.companyDomain = domainFromWebsite(item.website) || lead.companyDomain;
-      }
-      if (item.name && !lead.engagerCompany) {
-        lead.engagerCompany = item.name;
-        lead.companySource = "linkedin";
-      }
-    }
-  } catch (err) {
-    stats.errors += need.length;
-    log.warn("apify company scrape failed", {
-      error: String(err.message || err).slice(0, 200),
-      count: urls.length,
-    });
+    const companies = await readWaterfallCompanies(
+      supabase,
+      config.waterfallClientTag,
+      [],
+      need.map(waterfallRowOf),
+    );
+    applyCompanyHits(leads, companies, stats || { resolved: 0 });
+  } catch {
+    // Size backfill is best-effort from waterfall company rows only.
   }
-  return current;
+  return spend;
 }
 
 export function waterfallRowOf(lead) {
@@ -269,6 +279,7 @@ export function waterfallRowOf(lead) {
     first_name: lead.engagerFirstName || String(lead.engagerFullName || "").split(/\s+/)[0] || undefined,
     last_name: lead.engagerLastName || undefined,
     title: lead.engagerJobTitle || undefined,
+    email: isEmail(lead.engagerEmail) ? lead.engagerEmail : undefined,
     linkedin_url: lead.engagerLinkedinUrl || undefined,
   };
 }
@@ -296,8 +307,9 @@ export function applyWaterfallHit(lead, hit) {
     lead.companySource = lead.companySource || "aiark";
     changed = true;
   }
-  if (hit.employee_range && !cleanSizeBand(lead.engagerEmployees)) {
-    lead.engagerEmployees = cleanSizeBand(hit.employee_range) || hit.employee_range;
+  const size = sizeFromCompanyHit(hit);
+  if (size && !cleanSizeBand(lead.engagerEmployees)) {
+    lead.engagerEmployees = size;
     changed = true;
   }
   return changed;
@@ -369,6 +381,7 @@ export async function resolveEmails({ leads, waterfall, config, spend, supabase,
       need: "email",
       requireTitleMatch: false,
       background: true,
+      maxTier: config.waterfallMaxTier || "leadmagic",
     });
     const jobId = started?.job_id || started?.id || started?.jobId || null;
     stats.job_id = jobId;
@@ -430,16 +443,25 @@ export async function readWaterfallContacts(supabase, clientTag, rows) {
 
 export async function readWaterfallCompanies(supabase, clientTag, contacts, rows) {
   const table = `${clientTag}_wf_companies`;
+  const source = [...(contacts || []), ...(rows || [])];
   const domains = [
-    ...new Set(
-      [...(contacts || []), ...(rows || [])]
-        .map((r) => r.domain)
-        .filter(Boolean)
-        .map((d) => String(d).toLowerCase()),
-    ),
+    ...new Set(source.map((r) => r.domain).filter(Boolean).map((d) => String(d).toLowerCase())),
   ];
-  if (!domains.length) return [];
-  return selectInChunks(supabase, table, "domain, company_name, employee_range, website", "domain", domains);
+  const names = [...new Set(source.map((r) => r.company_name).filter(Boolean))];
+  const seen = new Set();
+  const out = [];
+  const add = (batch) => {
+    for (const row of batch || []) {
+      const key = `${String(row.domain || "").toLowerCase()}|${row.company_name || ""}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push(row);
+    }
+  };
+  const columns = "domain, company_name, employee_range, website";
+  if (domains.length) add(await selectInChunks(supabase, table, columns, "domain", domains));
+  if (names.length) add(await selectInChunks(supabase, table, columns, "company_name", names));
+  return out;
 }
 
 function applyHitsToLeads(leads, contacts, companies, stats) {
@@ -481,11 +503,34 @@ function indexContacts(contacts) {
   return map;
 }
 
+function applyCompanyHits(leads, companies, stats) {
+  const byDomain = indexCompanies(companies);
+  const byName = indexCompaniesByName(companies);
+  for (const lead of leads) {
+    const company =
+      byDomain.get(companyDomainOf(lead)) ||
+      byName.get((normCompany(lead.engagerCompany) || "").toLowerCase()) ||
+      null;
+    if (company && applyWaterfallHit(lead, company)) stats.resolved += 1;
+  }
+}
+
 function indexCompanies(companies) {
   const map = new Map();
   for (const row of companies || []) {
     const domain = String(row.domain || "").toLowerCase();
     if (domain) map.set(domain, row);
+  }
+  return map;
+}
+
+function indexCompaniesByName(companies) {
+  const map = new Map();
+  for (const row of companies || []) {
+    const name = (normCompany(row.company_name) || "").toLowerCase();
+    if (!name) continue;
+    const prev = map.get(name);
+    if (!prev || (sizeFromCompanyHit(row) && !sizeFromCompanyHit(prev))) map.set(name, row);
   }
   return map;
 }

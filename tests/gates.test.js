@@ -117,6 +117,41 @@ describe("verifier mapping", () => {
     assert.ok(logs[0].would_cost_cents > 400);
   });
 
+  it("can ignore the spend cap for an authorized verify one-shot", async () => {
+    let started = 0;
+    const result = await verifyRows({
+      rows: [row()],
+      config: { monthlySpendCapCents: 1, mvCentsPerCredit: 300, n2bCentsPerCheck: 0.8 },
+      spendCents: 100,
+      ignoreCap: true,
+      verifier: {
+        async start() {
+          started += 1;
+          return { run_id: "11111111-1111-1111-1111-111111111111" };
+        },
+        async waitForRun() {
+          return { status: "completed", mv_credits_used: 1, n2b_credits_used: 0 };
+        },
+        async results() {
+          return { downloads: { sendable_url: "https://files.test/sendable.csv", rejected_url: "https://files.test/rejected.csv" } };
+        },
+      },
+      fetchImpl: async (url) => {
+        if (String(url).includes("sendable")) return { text: async () => "Email\npat@acme.com\n" };
+        return { text: async () => "Email\n" };
+      },
+      putCsv: async (id) => `https://files.test/feeds/${id}.csv`,
+      publicBaseUrl: "https://pipeline.test",
+      onCapHit: async () => {
+        throw new Error("should not hit cap");
+      },
+      charge: async () => ({ spendCents: 100 }),
+    });
+    assert.equal(started, 1);
+    assert.equal(result.stats.cap_hit, false);
+    assert.equal(result.stats.verified, 1);
+  });
+
   it("maps verifier CSVs and charges billed credits", async () => {
     const charges = [];
     const feeds = new Map();
