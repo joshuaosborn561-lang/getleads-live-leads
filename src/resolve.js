@@ -157,7 +157,7 @@ export function uniqueCompanyLookupLeads(leads) {
   for (const lead of ranked) {
     const domain = companyDomainOf(lead);
     const name = (normCompany(lead.engagerCompany) || "").toLowerCase();
-    const keys = [domain, name].filter(Boolean);
+    const keys = [domain && `d:${domain}`, name && `n:${name}`].filter(Boolean);
     if (!keys.length || keys.some((key) => seen.has(key))) {
       for (const key of keys) seen.add(key);
       continue;
