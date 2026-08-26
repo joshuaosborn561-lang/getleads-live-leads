@@ -248,7 +248,7 @@ async function main() {
   for (const [index, batch] of chunk(still, BATCH).entries()) {
     const rows = batch.filter((lead) => companyDomainOf(lead)).map(waterfallRowOf);
     if (!rows.length) continue;
-    log.info("mcp enrich start", { batch: index + 1, rows: rows.length, max_tier: MAX_TIER });
+    log.info("mcp enrich start", { batch: index + 1, row_count: rows.length, max_tier: MAX_TIER });
     const started = await wf.enrich({
       rows,
       need: "email",
@@ -271,6 +271,11 @@ async function main() {
     const contacts = await readWaterfallContacts(supabase, config.waterfallClientTag, rows);
     const afterCompanies = await readWaterfallCompanies(supabase, config.waterfallClientTag, contacts, rows);
     applyHits(parkedLeads, contacts, afterCompanies);
+    const batchPersisted = await persistLeads(supabase, parked, parkedLeads, {
+      sentKeys,
+      maxAttempts: config.maxResolutionAttempts,
+    });
+    log.info("mcp batch persisted", { batch: index + 1, ...batchPersisted });
   }
 
   const persisted = await persistLeads(supabase, parked, parkedLeads, {
