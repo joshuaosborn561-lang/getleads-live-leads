@@ -1,3 +1,5 @@
+import { isEmail } from "./util/email.js";
+
 const LEGAL_SUFFIX =
   /[,\s]+(l\.?l\.?c\.?|inc\.?|incorporated|corp\.?|corporation|ltd\.?|limited|l\.?l\.?p\.?|p\.?l\.?l\.?c\.?|p\.?c\.?|co\.?|company|group|holdings?)\s*\.?$/i;
 
@@ -124,7 +126,7 @@ export function sizeBandStatus(band, company, email, campaignId) {
   const cleaned = cleanSizeBand(band);
   if (cleaned && (SIZE_DQ_SET.has(cleaned) || !SIZE_OK_SET.has(cleaned))) return "dq_size";
   if (!cleaned || !company) return "needs_company_data";
-  if (!email) return "needs_email";
+  if (!isEmail(email)) return "needs_email";
   if (!campaignId) return "pending_campaign";
   return "pending_verification";
 }

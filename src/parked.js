@@ -3,10 +3,17 @@ import { applyResolvedFields, resolveCompanies, resolveEmails } from "./resolve.
 import { markByDedupeKeys, fetchByStatus } from "./inbox.js";
 import { loadSpend } from "./spend.js";
 import { loadSuppressionMap } from "./gates/suppression.js";
-import { emailDomain, normalizeEmail } from "./util/email.js";
+import { emailDomain, isEmail } from "./util/email.js";
+
+function realEmail(...candidates) {
+  for (const value of candidates) {
+    if (isEmail(value)) return value;
+  }
+  return "";
+}
 
 export function nextParkedStatus(row, lead) {
-  const email = lead.engagerEmail || row.engager_email;
+  const email = realEmail(lead.engagerEmail, row.engager_email);
   const company = lead.engagerCompany || row.engager_company;
   const band = cleanSizeBand(lead.engagerEmployees || row.engager_employees);
   const campaignId = row.campaign_id;
@@ -36,7 +43,7 @@ export async function runParkedResolution({ supabase, config, apify, waterfall, 
     engagerLastName: row.engager_last_name,
     engagerFullName: row.engager_full_name,
     engagerLinkedinUrl: row.engager_linkedin_url,
-    engagerEmail: row.engager_email,
+    engagerEmail: isEmail(row.engager_email) ? row.engager_email : "",
     engagerCompany: row.engager_company,
     engagerEmployees: row.engager_employees,
     engagerCity: row.engager_city,
@@ -71,7 +78,7 @@ export async function runParkedResolution({ supabase, config, apify, waterfall, 
   for (const row of rows) {
     const lead = byKey.get(row.dedupe_key);
     const attempts = (row.resolution_attempts || 0) + 1;
-    const domain = emailDomain(normalizeEmail(lead?.engagerEmail));
+    const domain = emailDomain(realEmail(lead?.engagerEmail));
     if (domain && suppression.has(domain)) {
       await markByDedupeKeys(supabase, [row.dedupe_key], {
         status: "suppressed",
@@ -87,7 +94,7 @@ export async function runParkedResolution({ supabase, config, apify, waterfall, 
       attempts >= config.maxResolutionAttempts &&
       (status === "needs_email" || status === "needs_company_data");
     const patch = {
-      engager_email: lead?.engagerEmail || row.engager_email,
+      engager_email: realEmail(lead?.engagerEmail, row.engager_email) || row.engager_email,
       engager_company: lead?.engagerCompany || row.engager_company,
       engager_job_title: lead?.engagerJobTitle || row.engager_job_title,
       engager_city: lead?.engagerCity || row.engager_city,

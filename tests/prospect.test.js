@@ -13,7 +13,16 @@ import {
   sizeBandStatus,
 } from "../src/normalize.js";
 import { filterNewLeads } from "../src/pull.js";
-import { companyDomainOf, matchApifyItem, needsCompany, resolveCompanies } from "../src/resolve.js";
+import {
+  applyWaterfallHit,
+  companyDomainOf,
+  matchApifyItem,
+  needsCompany,
+  needsEmail,
+  resolveCompanies,
+  resolveEmails,
+  shouldWaterfall,
+} from "../src/resolve.js";
 import { mapApifyCompany, mapApifyProfile } from "../src/clients/apify.js";
 import { nextParkedStatus } from "../src/parked.js";
 
@@ -83,6 +92,7 @@ describe("normalize + size", () => {
     assert.equal(sizeBandStatus("11 to 50", "Acme", "a@x.com", 1), "pending_verification");
     assert.equal(sizeBandStatus("1 to 10", "Acme", "a@x.com", 1), "dq_size");
     assert.equal(sizeBandStatus("11 to 50", "Acme", null, 1), "needs_email");
+    assert.equal(sizeBandStatus("11 to 50", "Acme", "x", 1), "needs_email");
     assert.equal(sizeBandStatus(null, null, null, 1), "needs_company_data");
     assert.equal(sizeBandStatus("—", "Acme", "a@x.com", 1), "needs_company_data");
   });
@@ -141,7 +151,7 @@ describe("pull cursor + webhook map", () => {
     assert.ok(mapped.authorLinkedinUrl);
   });
 
-  it("requires a domain before email resolution and scrapes when size is missing", () => {
+  it("reads company domain from a website and treats placeholder size as missing", () => {
     assert.equal(needsCompany({ engagerCompany: "" }), true);
     assert.equal(needsCompany({ engagerCompany: "Acme", engagerEmployees: "—" }), true);
     assert.equal(needsCompany({ engagerCompany: "Acme", engagerEmployees: "11 to 50" }), false);
@@ -200,7 +210,7 @@ describe("pull cursor + webhook map", () => {
     );
   });
 
-  it("calls Apify when a company name exists but the size band does not", async () => {
+  it("does not scrape Apify when a person LinkedIn URL is present", async () => {
     const calls = [];
     const result = await resolveCompanies({
       leads: [
@@ -214,98 +224,109 @@ describe("pull cursor + webhook map", () => {
       apify: {
         async scrapeProfiles(urls) {
           calls.push(urls.length);
-          return {
-            items: [
-              {
-                linkedinUrl: "https://www.linkedin.com/in/pat-lee",
-                company: "Acme",
-                employees: "11 to 50",
-                website: "https://acme.com",
-              },
-            ],
-            usageTotalUsd: 0.004,
-            runId: "run1",
-          };
+          return { items: [], usageTotalUsd: 0, runId: "run1" };
+        },
+        async scrapeCompanies(urls) {
+          calls.push(urls.length);
+          return { items: [], usageTotalUsd: 0, runId: "c1" };
         },
       },
       config: { apifyToken: "t", apifyBatchSize: 50, apifyCentsPerProfile: 0.4 },
       spend: { spendCents: 0 },
-      supabase: {
-        async rpc(name, args) {
-          if (name === "sg_pipeline_add_spend") {
-            return {
-              data: { month_key: "2026-08", apify_cents: args.p_cents, waterfall_cents: 0, verifier_cents: 0 },
-              error: null,
-            };
-          }
-          return { data: { month_key: "2026-08", apify_cents: 0, waterfall_cents: 0, verifier_cents: 0 }, error: null };
-        },
-      },
+      supabase: { async rpc() { return { data: { month_key: "2026-08", apify_cents: 0, waterfall_cents: 0, verifier_cents: 0 }, error: null }; } },
       log: { info() {}, warn() {} },
       cap: 500,
     });
-    assert.equal(calls[0], 1);
-    assert.equal(result.leads[0].engagerEmployees, "11 to 50");
-    assert.equal(result.stats.resolved, 1);
+    assert.equal(calls.length, 0);
+    assert.ok(result.stats.skipped_aiark >= 1);
   });
 
-  it("looks up company size from the company actor when the profile scrape has no headcount", async () => {
-    const companyCalls = [];
-    const result = await resolveCompanies({
-      leads: [
-        {
-          dedupeKey: "x",
-          engagerCompany: "Acme",
-          engagerEmployees: null,
-          engagerLinkedinUrl: "https://www.linkedin.com/in/ACoAAA8BYqEBCGLg_vT_ca6mMEqkpp9nVffJ3hc",
+  it("treats junk getleads emails as missing and waterfalls with an existing Apify domain", async () => {
+    const person = {
+      engagerFirstName: "Pat",
+      engagerLastName: "Lee",
+      engagerCompany: "Acme",
+      engagerEmployees: "11 to 50",
+      engagerEmail: "x",
+      engagerLinkedinUrl: "https://www.linkedin.com/in/pat-lee",
+      companyDomain: "acme.com",
+    };
+    assert.equal(needsEmail(person), true);
+    assert.equal(needsCompany(person), false);
+    assert.equal(shouldWaterfall(person), true);
+    assert.equal(companyDomainOf(person), "acme.com");
+
+    const sent = [];
+    const result = await resolveEmails({
+      leads: [person],
+      waterfall: {
+        async health() { return { ok: true }; },
+        async ensureClient() { return { ok: true }; },
+        async enrich({ rows }) {
+          sent.push(rows);
+          return { job_id: "job-1" };
         },
-      ],
-      apify: {
-        async scrapeProfiles() {
-          return {
-            items: [
-              {
-                id: "ACoAAA8BYqEBCGLg_vT_ca6mMEqkpp9nVffJ3hc",
-                profileId: "ACoAAA8BYqEBCGLg_vT_ca6mMEqkpp9nVffJ3hc",
-                company: "Acme",
-                companyLinkedinUrl: "https://www.linkedin.com/company/acme-inc",
-              },
-            ],
-            usageTotalUsd: 0,
-            runId: "p1",
-          };
-        },
-        async scrapeCompanies(urls) {
-          companyCalls.push(urls.length);
-          return {
-            items: [
-              {
-                linkedinUrl: "https://www.linkedin.com/company/acme-inc",
-                employees: "51 to 200",
-                website: "https://acme.com",
-              },
-            ],
-            usageTotalUsd: 0.004,
-            runId: "c1",
-          };
-        },
+        async waitForJob() { return { status: "completed" }; },
       },
-      config: { apifyToken: "t", apifyBatchSize: 50, apifyCentsPerProfile: 0.4 },
+      config: { emailWaterfallMcpUrl: "https://example.test/mcp", waterfallClientTag: "salesglider", waterfallCentsPerRow: 15 },
       spend: { spendCents: 0 },
       supabase: {
+        from(table) {
+          return {
+            select() {
+              return {
+                in(_col, values) {
+                  if (table.endsWith("_wf_contacts")) {
+                    return {
+                      data: [
+                        {
+                          domain: "acme.com",
+                          first_name: "Pat",
+                          last_name: "Lee",
+                          email: "pat@acme.com",
+                          source_tier: "aiark",
+                          linkedin_url: "https://www.linkedin.com/in/pat-lee",
+                        },
+                      ],
+                      error: null,
+                    };
+                  }
+                  return { data: [{ domain: values[0], company_name: "Acme", employee_range: null }], error: null };
+                },
+              };
+            },
+          };
+        },
         async rpc(name, args) {
           return {
-            data: { month_key: "2026-08", apify_cents: args?.p_cents || 0, waterfall_cents: 0, verifier_cents: 0 },
+            data: { month_key: "2026-08", apify_cents: 0, waterfall_cents: args?.p_cents || 0, verifier_cents: 0 },
             error: null,
           };
         },
       },
       log: { info() {}, warn() {} },
-      cap: 500,
+      cap: 5000,
     });
-    assert.equal(companyCalls[0], 1);
-    assert.equal(result.leads[0].engagerEmployees, "51 to 200");
-    assert.equal(result.leads[0].companyDomain, "acme.com");
+    assert.equal(sent[0][0].domain, "acme.com");
+    assert.equal(sent[0][0].linkedin_url, "https://www.linkedin.com/in/pat-lee");
+    assert.equal(result.leads[0].engagerEmail, "pat@acme.com");
+    assert.equal(result.stats.resolved, 1);
+  });
+
+  it("can match a waterfall contact by LinkedIn URL and copy the work-email domain", () => {
+    const lead = {
+      engagerLinkedinUrl: "https://www.linkedin.com/in/pat-lee",
+      engagerFirstName: "Pat",
+    };
+    const changed = applyWaterfallHit(lead, {
+      email: "pat@acme.com",
+      source_tier: "aiark",
+      linkedin_url: "https://www.linkedin.com/in/pat-lee",
+    });
+    assert.equal(changed, true);
+    assert.equal(lead.engagerEmail, "pat@acme.com");
+    assert.equal(lead.companyDomain, "acme.com");
+    assert.equal(lead.companySource, "aiark");
   });
 
   it("re-gates parked placeholder bands as missing size, not dq_size", () => {
@@ -322,6 +343,13 @@ describe("pull cursor + webhook map", () => {
         { engagerEmployees: "11 to 50" },
       ),
       "pending_verification",
+    );
+    assert.equal(
+      nextParkedStatus(
+        { engager_company: "Acme", engager_employees: "11 to 50", engager_email: "x", campaign_id: 1 },
+        {},
+      ),
+      "needs_email",
     );
   });
 });
