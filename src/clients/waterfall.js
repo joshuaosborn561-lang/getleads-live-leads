@@ -20,13 +20,20 @@ export function createWaterfall(config, deps = {}) {
     );
   }
 
-  async function enrich({ rows, need = "email", requireTitleMatch = false, background = true }) {
+  async function enrich({
+    rows,
+    need = "email",
+    requireTitleMatch = false,
+    background = true,
+    maxTier = config.waterfallMaxTier || "leadmagic",
+  }) {
     const payload = {
       rows: typeof rows === "string" ? rows : JSON.stringify(rows),
       client_tag: config.waterfallClientTag,
       need,
       require_title_match: requireTitleMatch,
       background,
+      max_tier: maxTier,
     };
     return withBackoff(() => mcp.callTool("enrich_waterfall", payload));
   }

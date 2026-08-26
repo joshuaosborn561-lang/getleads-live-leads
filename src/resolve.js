@@ -369,6 +369,7 @@ export async function resolveEmails({ leads, waterfall, config, spend, supabase,
       need: "email",
       requireTitleMatch: false,
       background: true,
+      maxTier: config.waterfallMaxTier || "leadmagic",
     });
     const jobId = started?.job_id || started?.id || started?.jobId || null;
     stats.job_id = jobId;

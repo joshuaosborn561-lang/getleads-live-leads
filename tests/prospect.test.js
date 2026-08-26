@@ -24,7 +24,7 @@ import {
   shouldWaterfall,
 } from "../src/resolve.js";
 import { mapApifyCompany, mapApifyProfile } from "../src/clients/apify.js";
-import { nextParkedStatus } from "../src/parked.js";
+import { nextParkedStatus, parkedAttemptCount } from "../src/parked.js";
 
 function lead(overrides = {}) {
   return {
@@ -263,14 +263,14 @@ describe("pull cursor + webhook map", () => {
       waterfall: {
         async health() { return { ok: true }; },
         async ensureClient() { return { ok: true }; },
-        async enrich({ rows }) {
+        async enrich({ rows, maxTier }) {
           jobStarted = true;
-          sent.push(rows);
+          sent.push({ rows, maxTier });
           return { job_id: "job-1" };
         },
         async waitForJob() { return { status: "completed" }; },
       },
-      config: { emailWaterfallMcpUrl: "https://example.test/mcp", waterfallClientTag: "salesglider", waterfallCentsPerRow: 15 },
+      config: { emailWaterfallMcpUrl: "https://example.test/mcp", waterfallClientTag: "salesglider", waterfallCentsPerRow: 15, waterfallMaxTier: "leadmagic" },
       spend: { spendCents: 0 },
       supabase: {
         from(table) {
@@ -311,8 +311,9 @@ describe("pull cursor + webhook map", () => {
       log: { info() {}, warn() {} },
       cap: 5000,
     });
-    assert.equal(sent[0][0].domain, "acme.com");
-    assert.equal(sent[0][0].linkedin_url, "https://www.linkedin.com/in/pat-lee");
+    assert.equal(sent[0].rows[0].domain, "acme.com");
+    assert.equal(sent[0].rows[0].linkedin_url, "https://www.linkedin.com/in/pat-lee");
+    assert.equal(sent[0].maxTier, "leadmagic");
     assert.equal(result.leads[0].engagerEmail, "pat@acme.com");
     assert.equal(result.stats.resolved, 1);
   });
@@ -359,13 +360,13 @@ describe("pull cursor + webhook map", () => {
       waterfall: {
         async health() { return { ok: true }; },
         async ensureClient() { return { ok: true }; },
-        async enrich({ rows }) {
-          sent.push(rows);
+        async enrich({ rows, maxTier }) {
+          sent.push({ rows, maxTier });
           return { job_id: "job-2" };
         },
         async waitForJob() { return { status: "completed" }; },
       },
-      config: { emailWaterfallMcpUrl: "https://example.test/mcp", waterfallClientTag: "salesglider", waterfallCentsPerRow: 15 },
+      config: { emailWaterfallMcpUrl: "https://example.test/mcp", waterfallClientTag: "salesglider", waterfallCentsPerRow: 15, waterfallMaxTier: "leadmagic" },
       spend: { spendCents: 0 },
       supabase: {
         from() {
@@ -378,7 +379,8 @@ describe("pull cursor + webhook map", () => {
       log: { info() {}, warn() {} },
       cap: 5000,
     });
-    assert.equal(sent[0].length, 1);
+    assert.equal(sent[0].rows.length, 1);
+    assert.equal(sent[0].maxTier, "leadmagic");
   });
 
   it("re-gates parked placeholder bands as missing size, not dq_size", () => {
@@ -403,5 +405,12 @@ describe("pull cursor + webhook map", () => {
       ),
       "needs_email",
     );
+  });
+
+  it("does not burn resolution attempts when the spend cap blocks waterfall", () => {
+    const row = { resolution_attempts: 2 };
+    assert.equal(parkedAttemptCount(row, { holdAttempt: true }), 2);
+    assert.equal(parkedAttemptCount(row, { holdAttempt: false }), 3);
+    assert.equal(parkedAttemptCount({}, { holdAttempt: false }), 1);
   });
 });

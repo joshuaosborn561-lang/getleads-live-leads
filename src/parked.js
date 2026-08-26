@@ -20,24 +20,33 @@ export function nextParkedStatus(row, lead) {
   return sizeBandStatus(band, company, email, campaignId);
 }
 
-export async function runParkedResolution({ supabase, config, apify, waterfall, log }) {
+/** Cap skips are not failed attempts — do not burn the 3-try budget. */
+export function parkedAttemptCount(row, { holdAttempt } = {}) {
+  const current = Number(row.resolution_attempts || 0);
+  return holdAttempt ? current : current + 1;
+}
+
+export async function runParkedResolution({ supabase, config, apify, waterfall, log }, options = {}) {
   const parkedOrders = [
     ["resolution_attempts", { ascending: true }],
     ["last_resolution_at", { ascending: true, nullsFirst: true }],
     ["id", { ascending: true }],
   ];
-  let rows = await fetchByStatus(supabase, ["needs_email", "needs_company_data"], {
-    limit: config.enrichmentBatchLimit,
-    hasDomain: true,
-    orders: parkedOrders,
-  });
-  if (rows.length < config.enrichmentBatchLimit) {
-    const more = await fetchByStatus(supabase, ["needs_email", "needs_company_data"], {
-      limit: config.enrichmentBatchLimit - rows.length,
+  let rows = options.rows;
+  if (!rows) {
+    rows = await fetchByStatus(supabase, ["needs_email", "needs_company_data"], {
+      limit: config.enrichmentBatchLimit,
+      hasDomain: true,
       orders: parkedOrders,
     });
-    const seen = new Set(rows.map((r) => r.id));
-    rows = rows.concat(more.filter((r) => !seen.has(r.id)));
+    if (rows.length < config.enrichmentBatchLimit) {
+      const more = await fetchByStatus(supabase, ["needs_email", "needs_company_data"], {
+        limit: config.enrichmentBatchLimit - rows.length,
+        orders: parkedOrders,
+      });
+      const seen = new Set(rows.map((r) => r.id));
+      rows = rows.concat(more.filter((r) => !seen.has(r.id)));
+    }
   }
   const stats = { claimed: rows.length, updated: 0, unresolvable: 0, error: 0, cap_hit: false };
   if (!rows.length) return stats;
@@ -87,7 +96,9 @@ export async function runParkedResolution({ supabase, config, apify, waterfall, 
   const byKey = new Map(email.leads.map((l) => [l.dedupeKey, applyResolvedFields(l)]));
   for (const row of rows) {
     const lead = byKey.get(row.dedupe_key);
-    const attempts = (row.resolution_attempts || 0) + 1;
+    const gotEmail = Boolean(realEmail(lead?.engagerEmail, row.engager_email));
+    const holdAttempt = !gotEmail && email.stats.skipped_cap > 0;
+    const attempts = parkedAttemptCount(row, { holdAttempt });
     const domain = emailDomain(realEmail(lead?.engagerEmail));
     if (domain && suppression.has(domain)) {
       await markByDedupeKeys(supabase, [row.dedupe_key], {
