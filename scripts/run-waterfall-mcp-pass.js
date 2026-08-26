@@ -55,19 +55,33 @@ function inboxToResolveLead(row) {
   };
 }
 
+function tierHits(tiers, name) {
+  const t = tiers?.[name];
+  if (t == null) return null;
+  if (typeof t === "number") return t;
+  return t.email_hits ?? t.vendor_hits ?? null;
+}
+
 function jobSummary(job) {
   if (!job || typeof job !== "object") return { present: Boolean(job) };
+  const result = job.result && typeof job.result === "object" ? job.result : {};
+  const tiers = result.tier_stats || result.tier_breakdown || job.tiers || {};
+  const enabled = result.vendors_enabled || {};
   return {
     job_id: job.job_id || job.id || null,
     status: job.status || job.state || null,
-    rows_in: job.rows_in ?? job.row_count ?? null,
-    emails: job.emails ?? job.email_count ?? job.found ?? null,
-    cost_cents: job.cost_cents ?? job.spend_cents ?? null,
-    smartlead: job.smartlead ?? job.tiers?.smartlead ?? null,
-    aiark: job.aiark ?? job.tiers?.aiark ?? null,
-    leadmagic: job.leadmagic ?? job.tiers?.leadmagic ?? null,
-    prospeo: job.prospeo ?? job.tiers?.prospeo ?? null,
-    fullenrich: job.fullenrich ?? job.tiers?.fullenrich ?? null,
+    rows_in: result.rows_in ?? job.rows_in ?? job.row_count ?? null,
+    emails: result.emails_found ?? job.emails ?? job.email_count ?? job.found ?? null,
+    contacts_written: result.contacts_written ?? null,
+    max_tier: result.max_tier ?? job.max_tier ?? job.maxTier ?? null,
+    cost_cents: result.cost_cents ?? job.cost_cents ?? job.spend_cents ?? null,
+    smartlead: tierHits(tiers, "smartlead"),
+    aiark: tierHits(tiers, "aiark"),
+    leadmagic: tierHits(tiers, "leadmagic"),
+    prospeo: tierHits(tiers, "prospeo"),
+    fullenrich: tierHits(tiers, "fullenrich"),
+    prospeo_enabled: enabled.prospeo ?? null,
+    fullenrich_enabled: enabled.fullenrich ?? null,
   };
 }
 
