@@ -34,6 +34,7 @@ export async function verifyRows({
   fetchImpl = globalThis.fetch,
   onCapHit,
   charge,
+  ignoreCap = false,
 }) {
   const stats = {
     verified: 0,
@@ -50,7 +51,7 @@ export async function verifyRows({
   if (!rows.length) return { stats, patches };
 
   const estimate = estimateVerifierCents(rows.length, config);
-  if (wouldExceedCap(spendCents, estimate, config.monthlySpendCapCents)) {
+  if (!ignoreCap && wouldExceedCap(spendCents, estimate, config.monthlySpendCapCents)) {
     stats.cap_hit = true;
     stats.released = rows.length;
     await onCapHit({

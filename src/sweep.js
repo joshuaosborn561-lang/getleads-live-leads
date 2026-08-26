@@ -58,7 +58,7 @@ export async function promoteStampedPending(supabase) {
   });
 }
 
-export async function runSweep({ supabase, config, verifier, smartlead, log, fetchImpl }) {
+export async function runSweep({ supabase, config, verifier, smartlead, log, fetchImpl, ignoreCap = false }) {
   const counts = emptyCounts();
 
   counts.reclaimed = await reclaimStale(supabase, config.staleVerifyingMinutes);
@@ -135,6 +135,7 @@ export async function runSweep({ supabase, config, verifier, smartlead, log, fet
       fetchImpl,
       onCapHit,
       charge: (vendor, cents) => addSpend(supabase, vendor, cents),
+      ignoreCap,
     });
     counts.verified += verified.stats.verified;
     counts.verified_bad += verified.stats.verified_bad;
