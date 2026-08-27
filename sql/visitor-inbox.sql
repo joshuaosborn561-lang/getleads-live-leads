@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS public.sg_visitor_inbox (
   company_domain text,
   company_employees text,
   page_url text,
+  visited_at timestamptz,
   city text,
   country text,
   campaign_id bigint,

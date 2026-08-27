@@ -59,6 +59,15 @@ function linkedinOf(raw: string | null): string | null {
   return withProto.replace(/\/+$/, "").toLowerCase();
 }
 
+function tsOf(...vals: unknown[]): string | null {
+  for (const value of vals) {
+    if (typeof value !== "string" || value.trim() === "") continue;
+    const parsed = new Date(value.trim());
+    if (!Number.isNaN(parsed.getTime())) return parsed.toISOString();
+  }
+  return null;
+}
+
 async function hashKey(parts: string[]): Promise<string> {
   const material = parts.filter(Boolean).join("|").toLowerCase();
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(material));
@@ -161,15 +170,21 @@ async function mapVisitor(it: Record<string, unknown>, siteHint: string | null) 
     it.engager_employees,
     it.employees,
   );
+  const visit = nested(it, "visit", "session");
   const pageUrl = str(
+    visit.page,
+    visit.page_url,
+    visit.pageUrl,
+    visit.url,
+    visit.landing_page,
+    visit.landingPage,
+    visit.entry_page,
     it.page_url,
     it.pageUrl,
     it.url,
     it.landing_page,
     it.landingPage,
     it.page,
-    nested(it, "session").landing_page,
-    nested(it, "session").entry_page,
   );
   const visitorId = str(
     it.visitorId,
@@ -212,6 +227,7 @@ async function mapVisitor(it: Record<string, unknown>, siteHint: string | null) 
     company_domain: companyDomain,
     company_employees: employees,
     page_url: pageUrl,
+    visited_at: tsOf(visit.ts, visit.timestamp, visit.visited_at, it.timestamp, it.visited_at, it.ts),
     city,
     country,
     campaign_id: null,
