@@ -22,6 +22,32 @@ const str = (...vals: unknown[]) => {
   }
   return null;
 };
+const PHONE_KEY = /^(phone|mobile|cell|cellphone|phone_number|phonenumber|mobile_phone|mobilephone|direct_dial|directdial|work_phone|cell_phone|cellphone|personal_phone)$/i;
+const phoneOf = (...objs: Record<string, unknown>[]) => {
+  for (const o of objs) {
+    const v = str(
+      o.phone, o.mobile, o.cell, o.cellphone, o.phone_number, o.phoneNumber,
+      o.mobile_phone, o.mobilePhone, o.direct_dial, o.directDial, o.work_phone,
+      o.cell_phone, o.cellPhone, o.personal_phone,
+    );
+    if (v) return v;
+    const custom = o.custom_fields ?? o.customFields ?? o.custom;
+    if (Array.isArray(custom)) {
+      for (const item of custom) {
+        const r = rec(item);
+        const name = str(r.name, r.key, r.field);
+        if (name && PHONE_KEY.test(name.replace(/[\s-]/g, "_"))) {
+          const cv = str(r.value, r.val);
+          if (cv) return cv;
+        }
+      }
+    } else if (custom && typeof custom === "object") {
+      const nested = phoneOf(rec(custom));
+      if (nested) return nested;
+    }
+  }
+  return null;
+};
 const itemsFrom = (payload: unknown) => {
   if (Array.isArray(payload)) return payload as Record<string, unknown>[];
   const b = rec(payload);
@@ -82,6 +108,7 @@ async function mapVisitor(it: Record<string, unknown>, siteHint: string | null) 
     last = last || p.slice(1).join(" ") || null;
   }
   const email = (str(person.work_email, person.email, it.work_email, it.email) || "").toLowerCase() || null;
+  const phone = phoneOf(person, nest(it, "visitor"), it);
   const linkedin = liOf(str(person.linkedin_url, person.linkedin, person.profile_url, it.linkedin_url, it.linkedin));
   const companyName = str(company.name, company.company_name, it.company_name, it.engagerCompany);
   const companyDomain = domainOf(str(company.domain, company.website, it.company_domain, it.domain));
@@ -98,6 +125,7 @@ async function mapVisitor(it: Record<string, unknown>, siteHint: string | null) 
     last_name: last,
     full_name: full,
     email,
+    phone,
     linkedin_url: linkedin,
     job_title: str(person.title, person.job_title, person.headline, it.title, it.job_title),
     company_name: companyName,
@@ -178,6 +206,7 @@ async function matchHeyreach(token: string, row: Row) {
   const campaigns: string[] = [];
   const messages: string[] = [];
   let profile = row.linkedin_url;
+  let phone: string | null = null;
   let found = false;
   const camps = await hr(token, "/campaign/GetCampaignsForLead", { email: row.email, profileUrl: row.linkedin_url });
   if (camps.status < 400) {
@@ -191,6 +220,7 @@ async function matchHeyreach(token: string, row: Row) {
     const lead = await hr(token, "/lead/GetLead", { profileUrl: row.linkedin_url });
     const p = rec(hrItems(lead.json)[0] || rec(lead.json).lead || lead.json);
     profile = liOf(str(p.profileUrl, rec(p.linkedInUserProfile).profileUrl)) || profile;
+    phone = phone || phoneOf(p, rec(p.linkedInUserProfile));
     if (lead.status < 400 && (p.profileUrl || p.id || p.firstName)) found = true;
   }
   let convs: Record<string, unknown>[] = [];
@@ -206,6 +236,7 @@ async function matchHeyreach(token: string, row: Row) {
     found = true;
     const who = rec(it.correspondentProfile || it.correspondent || it.lead);
     profile = liOf(str(who.profileUrl, who.linkedinUrl, it.profileUrl, profile)) || profile;
+    phone = phone || phoneOf(who, rec(it));
     const cn = str(it.campaignName, rec(it.campaign).name);
     if (cn) campaigns.push(cn);
     const last = str(it.lastMessageText, it.lastMessage);
@@ -225,7 +256,7 @@ async function matchHeyreach(token: string, row: Row) {
       }
     }
   }
-  return { found, profile_url: profile, campaigns: [...new Set(campaigns)].slice(0, 6), messages: messages.slice(0, 5) };
+  return { found, profile_url: profile, phone, campaigns: [...new Set(campaigns)].slice(0, 6), messages: messages.slice(0, 5) };
 }
 
 function card(row: Row, sl: Awaited<ReturnType<typeof matchSmartlead>>, hrMatch: Awaited<ReturnType<typeof matchHeyreach>>) {
@@ -238,6 +269,7 @@ function card(row: Row, sl: Awaited<ReturnType<typeof matchSmartlead>>, hrMatch:
     row.job_title,
     [row.company_name, row.company_domain, row.company_employees].filter(Boolean).join(" · ") || null,
     row.email ? `\`${row.email}\`` : null,
+    row.phone ? `Cell: ${row.phone}` : "Cell: _not provided_",
     row.page_url ? `Landed on: ${row.page_url}` : null,
     row.site_id ? `Site: ${row.site_id}` : null,
   ].filter(Boolean).join("\n");
@@ -276,7 +308,26 @@ async function notify(db: SB, row: Row) {
   const slackTok = await secret(db, "slack_salesglider");
   const hrTok = await secret(db, "heyreach_salesglider");
   const sl = await matchSmartlead(db, row);
-  const hrMatch = hrTok ? await matchHeyreach(hrTok, row) : { found: false, profile_url: row.linkedin_url, campaigns: [] as string[], messages: [] as string[] };
+  const hrMatch = hrTok ? await matchHeyreach(hrTok, row) : { found: false, profile_url: row.linkedin_url, phone: null as string | null, campaigns: [] as string[], messages: [] as string[] };
+  if (!row.phone && row.email) {
+    const { data: wf } = await db.from("salesglider_wf_contacts").select("cellphone").ilike("email", row.email).not("cellphone", "is", null).neq("cellphone", "").limit(1);
+    row.phone = str(wf?.[0]?.cellphone) || row.phone;
+  }
+  if (!row.phone) {
+    const slKey = await secret(db, "smartlead_salesglider");
+    if (slKey && row.email) {
+      try {
+        const u = new URL("https://server.smartlead.ai/api/v1/leads/");
+        u.searchParams.set("api_key", slKey);
+        u.searchParams.set("email", row.email);
+        const res = await fetch(u.toString());
+        const j = rec(await res.json().catch(() => ({})));
+        const lead = rec((j.data as Record<string, unknown>[] | undefined)?.[0] || j.lead || j);
+        row.phone = phoneOf(lead, rec(lead.custom_fields), rec(lead.lead));
+      } catch { /* leave empty */ }
+    }
+  }
+  row.phone = row.phone || hrMatch.phone;
   const c = card(row, sl, hrMatch);
   let slackTs: string | null = null;
   let slackStatus = slackTok ? "skipped" : "err:no_token";
@@ -293,8 +344,9 @@ async function notify(db: SB, row: Row) {
     } catch { slackStatus = "err:network"; }
   }
   await db.from("sg_visitor_inbox").update({
+    phone: row.phone,
     slack_ts: slackTs,
-    match: { smartlead_hits: sl.length, heyreach: hrMatch.found, slack: slackStatus, client_id: SL_CLIENT },
+    match: { smartlead_hits: sl.length, heyreach: hrMatch.found, slack: slackStatus, client_id: SL_CLIENT, has_phone: !!row.phone },
   }).eq("dedupe_key", row.dedupe_key);
   return { slack: slackStatus, matched: c.matched };
 }

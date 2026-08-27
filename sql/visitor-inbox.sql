@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS public.sg_visitor_inbox (
   last_name text,
   full_name text,
   email text,
+  phone text,
   linkedin_url text,
   job_title text,
   company_name text,
