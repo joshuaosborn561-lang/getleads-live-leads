@@ -11,7 +11,7 @@ company resolution (Apify)
    ↓
 email resolution (Email Finder Waterfall MCP)
    ↓
-POST gl-engager-hook
+POST gl-engager-hook   ← LinkedIn engagers only
    ↓
 verification (Email Verifier Progression MCP)
    ↓
@@ -43,6 +43,15 @@ Volume is not the goal. Ambiguous leads are dropped or parked. Paid calls never 
 Terminal, never reprocessed: `dq_size`, `pending_campaign`, `suppressed`, `duplicate`, `verified_bad`, `imported`, `unresolvable`.
 
 The webhook is the only insert path into `sg_engager_inbox`. Re-POSTing the same `dedupeKey` is a no-op (`ignoreDuplicates`). `dedupeKey` is getleads `leadId`. Never invent one.
+
+Website visitors use a different hook and table. Do not point visitor identification at `gl-engager-hook` — those payloads have no engager `leadId` and are dropped.
+
+| Stream | Hook | Token | Table |
+| --- | --- | --- | --- |
+| LinkedIn engagers | `.../functions/v1/gl-engager-hook?token=sg_eng_9f4c21ab7de6` | `sg_eng_9f4c21ab7de6` | `sg_engager_inbox` |
+| Website visitors | `.../functions/v1/gl-visitor-hook?token=sg_vis_17b3334f00c0` | `sg_vis_17b3334f00c0` | `sg_visitor_inbox` |
+
+`gl-visitor-hook` accepts getleads pixel / visitor JSON (`person` + `company`, or a `visitors`/`leads`/`data` array). It does not write engager rows and does not import to Smartlead until a visitor campaign id is set.
 
 ## Loops
 
