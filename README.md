@@ -53,6 +53,8 @@ Website visitors use a different hook and table. Do not point visitor identifica
 
 `gl-visitor-hook` accepts getleads pixel / visitor JSON (`person` + `company`, or a `visitors`/`leads`/`data` array). It does not write engager rows and does not import to Smartlead until a visitor campaign id is set.
 
+After insert it cross-references SalesGlider only (`smartlead_client_id=345263`, vault key `heyreach_salesglider`) and posts enriched info, LinkedIn, and outreach copy to Slack `C0BS6H62P3P`.
+
 ## Loops
 
 - **Pull** every `RUN_INTERVAL_MINUTES` (60): high-water mark per `profileId` on `capturedAt`, gates, optional paid resolve (capped by `ENRICHMENT_BATCH_LIMIT`), webhook batches of 200.

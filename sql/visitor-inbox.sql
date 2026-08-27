@@ -25,6 +25,8 @@ CREATE TABLE IF NOT EXISTS public.sg_visitor_inbox (
   lane text NOT NULL DEFAULT 'visitor',
   status text NOT NULL DEFAULT 'received',
   routing_note text,
+  slack_ts text,
+  match jsonb,
   raw jsonb NOT NULL
 );
 
