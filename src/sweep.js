@@ -91,13 +91,6 @@ export async function runSweep({ supabase, config, verifier, smartlead, log, fet
 
     const spend = await loadSpend(supabase);
     counts.spend_cents = spend.spendCents;
-    let capLogged = false;
-    const onCapHit = async (info) => {
-      if (capLogged) return;
-      capLogged = true;
-      counts.cap_hit = true;
-      log.warn("monthly spend cap hit; leaving remaining rows parked", info);
-    };
 
     const verified = await verifyRows({
       rows: afterSl,
@@ -121,7 +114,6 @@ export async function runSweep({ supabase, config, verifier, smartlead, log, fet
         return url;
       },
       fetchImpl,
-      onCapHit,
       charge: (vendor, cents) => addSpend(supabase, vendor, cents),
     });
     counts.verified += verified.stats.verified;

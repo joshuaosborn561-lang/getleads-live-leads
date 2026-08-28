@@ -1,7 +1,6 @@
 import { parseCsv } from "../util/csv.js";
 import { normalizeEmail } from "../util/email.js";
 import { extractRunId } from "../clients/verifier.js";
-import { wouldExceedCap } from "../spend.js";
 
 export function estimateVerifierCents(count, config) {
   return count * config.mvCentsPerCredit + count * config.n2bCentsPerCheck;
@@ -48,20 +47,6 @@ export async function verifyRows({
   };
   const patches = [];
   if (!rows.length) return { stats, patches };
-
-  const estimate = estimateVerifierCents(rows.length, config);
-  if (wouldExceedCap(spendCents, estimate, config.monthlySpendCapCents)) {
-    stats.cap_hit = true;
-    stats.released = rows.length;
-    await onCapHit({
-      reason: "verifier",
-      remaining: rows.length,
-      spend_cents: spendCents,
-      cap_cents: config.monthlySpendCapCents,
-      would_cost_cents: estimate,
-    });
-    return { stats, patches, releaseKeys: rows.map((r) => r.dedupe_key) };
-  }
 
   const feedId = `vf_${Date.now().toString(36)}`;
   const header = "Email\n";

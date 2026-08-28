@@ -87,7 +87,6 @@ export async function runPull({ supabase, config, getleads, apify, waterfall, we
     spend,
     supabase,
     log,
-    cap: config.monthlySpendCapCents,
   });
   counts.company_resolved = company.stats.resolved;
   capHit = capHit || company.stats.skipped_cap > 0;
@@ -99,7 +98,6 @@ export async function runPull({ supabase, config, getleads, apify, waterfall, we
     spend: company.spend,
     supabase,
     log,
-    cap: config.monthlySpendCapCents,
   });
   counts.email_resolved = email.stats.resolved;
   capHit = capHit || email.stats.skipped_cap > 0;

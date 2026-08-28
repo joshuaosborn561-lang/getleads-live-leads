@@ -180,6 +180,7 @@ export async function main(env = process.env, argv = process.argv) {
     verify_sweep_interval_minutes: config.verifySweepIntervalMinutes,
     enrichment_batch_limit: config.enrichmentBatchLimit,
     monthly_spend_cap_cents: config.monthlySpendCapCents,
+    apify_job_cap_usd: config.apifyJobCapUsd,
   });
   return { server, pullTick, sweepTick };
 }

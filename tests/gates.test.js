@@ -6,7 +6,7 @@ import { applyInboxDedupe } from "../src/gates/dedupe.js";
 import { applySuppression } from "../src/gates/suppression.js";
 import { chunk, groupByCampaign, importStaged } from "../src/gates/import.js";
 import { toStagingRow } from "../src/gates/stage.js";
-import { wouldExceedCap } from "../src/spend.js";
+import { wouldExceedApifyJob, wouldExceedCap } from "../src/spend.js";
 import { sanitizeLogExtra } from "../src/logger.js";
 import { withBackoff } from "../src/http.js";
 import { createMcpClient } from "../src/clients/mcp.js";
@@ -99,22 +99,43 @@ describe("verifier mapping", () => {
     assert.match(result.patches[0].patch.routing_note, /not Railway/);
   });
 
-  it("stops before the verifier when the cap would be exceeded", async () => {
-    const logs = [];
+  it("still starts the verifier when month-to-date spend is already over the old monthly cap", async () => {
+    const started = [];
     const result = await verifyRows({
-      rows: [row(), row({ id: 2, dedupe_key: "d2" })],
+      rows: [row(), row({ id: 2, dedupe_key: "d2", engager_email: "ca@acme.com" })],
       config: { monthlySpendCapCents: 500, mvCentsPerCredit: 300, n2bCentsPerCheck: 0.8 },
-      spendCents: 100,
-      verifier: { start() { throw new Error("should not start"); } },
-      putCsv() { throw new Error("should not write csv"); },
+      spendCents: 16732,
+      verifier: {
+        async start({ fileUrl }) {
+          started.push(fileUrl);
+          return { run_id: "33333333-3333-3333-3333-333333333333" };
+        },
+        async waitForRun() { return { status: "completed", mv_credits_used: 2, n2b_credits_used: 0 }; },
+        async results() {
+          return {
+            downloads: {
+              sendable_url: "https://files.test/sendable.csv",
+              rejected_url: "https://files.test/rejected.csv",
+            },
+          };
+        },
+      },
+      putCsv: async () => "https://files.test/feeds/vf_x.csv",
       publicBaseUrl: "https://example.test",
-      onCapHit: async (info) => logs.push(info),
-      charge: async () => ({ spendCents: 100 }),
+      fetchImpl: async (url) => {
+        if (String(url).includes("sendable")) {
+          return { text: async () => "Email\npat@acme.com\nca@acme.com\n" };
+        }
+        return { text: async () => "Email\n" };
+      },
+      onCapHit: async () => {
+        throw new Error("monthly cap must not block verify");
+      },
+      charge: async () => ({ spendCents: 16732 }),
     });
-    assert.equal(result.stats.cap_hit, true);
-    assert.equal(result.releaseKeys.length, 2);
-    assert.equal(logs[0].reason, "verifier");
-    assert.ok(logs[0].would_cost_cents > 400);
+    assert.equal(started.length, 1);
+    assert.equal(result.stats.cap_hit, false);
+    assert.equal(result.stats.verified, 2);
   });
 
   it("maps verifier CSVs and charges billed credits", async () => {
@@ -265,6 +286,9 @@ describe("spend + location + logs + backoff", () => {
   it("detects a cap breach", () => {
     assert.equal(wouldExceedCap(400, 101, 500), true);
     assert.equal(wouldExceedCap(400, 100, 500), false);
+    assert.equal(wouldExceedApifyJob(2000, 50), false);
+    assert.equal(wouldExceedApifyJob(5000, 50), false);
+    assert.equal(wouldExceedApifyJob(5001, 50), true);
     assert.ok(Math.abs(estimateVerifierCents(10, { mvCentsPerCredit: 0.178, n2bCentsPerCheck: 0.8 }) - 9.78) < 1e-9);
   });
 

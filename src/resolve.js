@@ -9,7 +9,7 @@ import {
   normCompany,
   normFirstName,
 } from "./normalize.js";
-import { addSpend, wouldExceedCap } from "./spend.js";
+import { addSpend, apifyJobCapUsd, wouldExceedApifyJob } from "./spend.js";
 import { emailDomain, isEmail } from "./util/email.js";
 
 export function needsCompany(lead) {
@@ -135,7 +135,7 @@ export function applyProfileItem(lead, item) {
   return changed;
 }
 
-export async function resolveCompanies({ leads, apify, config, spend, supabase, log, cap }) {
+export async function resolveCompanies({ leads, apify, config, spend, supabase, log }) {
   const stats = { attempted: 0, resolved: 0, skipped_cap: 0, skipped_aiark: 0, errors: 0, spend_cents: 0 };
   const out = leads.map((l) => ({ ...l }));
   // AI Ark (via waterfall + person LinkedIn URL) owns company/domain lookup now.
@@ -150,20 +150,20 @@ export async function resolveCompanies({ leads, apify, config, spend, supabase, 
   }
 
   let current = spend;
-  const remainingBudget = () => cap - current.spendCents;
-  const canAfford = (n) =>
-    !wouldExceedCap(current.spendCents, n * config.apifyCentsPerProfile, cap);
+  const jobCapUsd = apifyJobCapUsd(config);
+  const canAffordJob = (n) =>
+    !wouldExceedApifyJob(n * config.apifyCentsPerProfile, jobCapUsd);
 
   for (const part of chunk(missing, config.apifyBatchSize)) {
-    if (!canAfford(part.length) || remainingBudget() <= 0) {
+    if (!canAffordJob(part.length)) {
       stats.skipped_cap += part.length;
-      await logCap(log, "apify", current, cap, part.length * config.apifyCentsPerProfile);
+      logApifyJobCap(log, "apify", part.length * config.apifyCentsPerProfile, jobCapUsd);
       break;
     }
     stats.attempted += part.length;
     try {
       const result = await apify.scrapeProfiles(part.map((l) => l.engagerLinkedinUrl), {
-        maxTotalChargeUsd: Math.max(0.05, (part.length * config.apifyCentsPerProfile) / 100 + 0.1),
+        maxTotalChargeUsd: jobCapUsd,
       });
       const cents = result.usageTotalUsd
         ? Number(result.usageTotalUsd) * 100
@@ -198,7 +198,6 @@ export async function resolveCompanies({ leads, apify, config, spend, supabase, 
       spend: current,
       supabase,
       log,
-      cap,
       stats,
     });
   }
@@ -206,7 +205,7 @@ export async function resolveCompanies({ leads, apify, config, spend, supabase, 
   return { leads: out, stats, spend: current };
 }
 
-export async function resolveCompanySizes({ leads, apify, config, spend, supabase, log, cap, stats }) {
+export async function resolveCompanySizes({ leads, apify, config, spend, supabase, log, stats }) {
   let current = spend;
   const need = leads.filter(
     (l) => !cleanSizeBand(l.engagerEmployees) && l.companyLinkedinUrl && !l.engagerLinkedinUrl,
@@ -214,14 +213,15 @@ export async function resolveCompanySizes({ leads, apify, config, spend, supabas
   if (!need.length) return current;
   const urls = [...new Set(need.map((l) => l.companyLinkedinUrl).filter(Boolean))];
   const estimate = urls.length * config.apifyCentsPerProfile;
-  if (wouldExceedCap(current.spendCents, estimate, cap)) {
+  const jobCapUsd = apifyJobCapUsd(config);
+  if (wouldExceedApifyJob(estimate, jobCapUsd)) {
     stats.skipped_cap += need.length;
-    await logCap(log, "apify-company", current, cap, estimate);
+    logApifyJobCap(log, "apify-company", estimate, jobCapUsd);
     return current;
   }
   try {
     const result = await apify.scrapeCompanies(urls, {
-      maxTotalChargeUsd: Math.max(0.05, estimate / 100 + 0.1),
+      maxTotalChargeUsd: jobCapUsd,
     });
     const cents = result.usageTotalUsd
       ? Number(result.usageTotalUsd) * 100
@@ -303,7 +303,7 @@ export function applyWaterfallHit(lead, hit) {
   return changed;
 }
 
-export async function resolveEmails({ leads, waterfall, config, spend, supabase, log, cap }) {
+export async function resolveEmails({ leads, waterfall, config, spend, supabase, log }) {
   const stats = {
     attempted: 0,
     resolved: 0,
@@ -354,11 +354,6 @@ export async function resolveEmails({ leads, waterfall, config, spend, supabase,
   indexed.push(...stillLeads);
 
   const estimate = rows.length * config.waterfallCentsPerRow;
-  if (wouldExceedCap(current.spendCents, estimate, cap)) {
-    stats.skipped_cap += rows.length;
-    await logCap(log, "waterfall", current, cap, estimate);
-    return { leads: out, stats, spend: current };
-  }
 
   stats.attempted += rows.length;
   try {
@@ -490,12 +485,11 @@ function indexCompanies(companies) {
   return map;
 }
 
-async function logCap(log, vendor, spend, cap, wouldCost) {
-  log.warn("monthly spend cap hit; leaving remaining rows parked", {
+function logApifyJobCap(log, vendor, estimatedCents, capUsd) {
+  log.warn("apify job would exceed per-job cap; skipping this batch", {
     reason: vendor,
-    spend_cents: spend.spendCents,
-    cap_cents: cap,
-    would_cost_cents: wouldCost,
+    estimated_cents: estimatedCents,
+    cap_usd: capUsd,
   });
 }
 

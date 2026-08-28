@@ -75,6 +75,7 @@ export function loadConfig(env = process.env, argv = process.argv) {
     recencyDays: num(env, "RECENCY_DAYS", 90),
     enrichmentBatchLimit: num(env, "ENRICHMENT_BATCH_LIMIT", 250),
     monthlySpendCapCents: num(env, "MONTHLY_SPEND_CAP_CENTS", 500),
+    apifyJobCapUsd: num(env, "APIFY_JOB_CAP_USD", 50),
     runIntervalMinutes: num(env, "RUN_INTERVAL_MINUTES", 60),
     verifySweepIntervalMinutes: num(env, "VERIFY_SWEEP_INTERVAL_MINUTES", 15),
     sweepLimit: num(env, "SWEEP_LIMIT", 500),

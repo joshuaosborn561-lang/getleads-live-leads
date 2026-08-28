@@ -71,7 +71,6 @@ export async function runParkedResolution({ supabase, config, apify, waterfall, 
     spend,
     supabase,
     log,
-    cap: config.monthlySpendCapCents,
   });
   const email = await resolveEmails({
     leads: company.leads,
@@ -80,7 +79,6 @@ export async function runParkedResolution({ supabase, config, apify, waterfall, 
     spend: company.spend,
     supabase,
     log,
-    cap: config.monthlySpendCapCents,
   });
   stats.cap_hit = company.stats.skipped_cap > 0 || email.stats.skipped_cap > 0;
 

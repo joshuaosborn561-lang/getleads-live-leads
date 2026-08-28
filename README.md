@@ -53,9 +53,9 @@ A run that pulls zero and imports zero is normal. It logs and exits the tick. No
 
 ## Spend
 
-`public.sg_pipeline_spend` is month-keyed and split `apify` / `waterfall` / `verifier`. One cap: `MONTHLY_SPEND_CAP_CENTS`. When the next paid call would exceed it, spending stops, rows stay parked, and one log line is written.
+`public.sg_pipeline_spend` is month-keyed and split `apify` / `waterfall` / `verifier` for telemetry. Waterfall and verifier are not gated by a monthly dollar cap. Apify is capped at `APIFY_JOB_CAP_USD` (default 50) per actor run via `maxTotalChargeUsd`; a batch whose estimate would exceed that is skipped and the rest of the pipeline continues.
 
-Ship the first pass at `ENRICHMENT_BATCH_LIMIT=100` and read `/health` `first_run` before raising the batch or the cap.
+Ship the first pass at `ENRICHMENT_BATCH_LIMIT=100` and read `/health` `first_run` before raising the batch.
 
 ## Hard rules
 

@@ -52,14 +52,10 @@ async function main() {
         pending_verification: Number(statuses.pending_verification || 0),
         imported: Number(statuses.imported || 0),
         spend_cents: spend.spendCents,
-        cap_cents: config.monthlySpendCapCents,
+        apify_job_cap_usd: config.apifyJobCapUsd,
       }),
     );
     if (parked <= 0) break;
-    if (spend.spendCents >= config.monthlySpendCapCents) {
-      console.log(JSON.stringify({ step: "cap_stop", spend_cents: spend.spendCents }));
-      break;
-    }
 
     const parkedStats = await runParkedResolution(deps);
     const sweepStats = await runSweep(deps);
