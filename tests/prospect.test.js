@@ -241,6 +241,60 @@ describe("pull cursor + webhook map", () => {
     assert.ok(result.stats.skipped_aiark >= 1);
   });
 
+  it("skips an Apify batch only when that job itself would exceed APIFY_JOB_CAP_USD", async () => {
+    const calls = [];
+    const result = await resolveCompanies({
+      leads: [
+        {
+          dedupeKey: "x",
+          engagerCompany: "",
+          engagerEmployees: null,
+        },
+      ],
+      apify: {
+        async scrapeProfiles(urls, opts) {
+          calls.push({ urls, opts });
+          return { items: [], usageTotalUsd: 0, runId: "run1" };
+        },
+      },
+      config: { apifyToken: "t", apifyBatchSize: 50, apifyCentsPerProfile: 10000, apifyJobCapUsd: 50 },
+      spend: { spendCents: 0 },
+      supabase: { async rpc() { return { data: { month_key: "2026-08", apify_cents: 0, waterfall_cents: 0, verifier_cents: 0 }, error: null }; } },
+      log: { info() {}, warn() {} },
+      cap: 500,
+    });
+    assert.equal(calls.length, 0);
+    assert.equal(result.stats.skipped_cap, 1);
+  });
+
+  it("passes the $50 Apify job cap into the actor run even when month-to-date spend is already high", async () => {
+    const calls = [];
+    const result = await resolveCompanies({
+      leads: [
+        {
+          dedupeKey: "x",
+          engagerCompany: "",
+          engagerEmployees: null,
+        },
+      ],
+      apify: {
+        async scrapeProfiles(urls, opts) {
+          calls.push({ urls, opts });
+          return { items: [], usageTotalUsd: 0.2, runId: "run1" };
+        },
+      },
+      config: { apifyToken: "t", apifyBatchSize: 50, apifyCentsPerProfile: 0.4, apifyJobCapUsd: 50 },
+      spend: { spendCents: 16732 },
+      supabase: { async rpc() { return { data: { month_key: "2026-08", apify_cents: 16732, waterfall_cents: 0, verifier_cents: 0 }, error: null }; } },
+      log: { info() {}, warn() {} },
+      cap: 500,
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].opts.maxTotalChargeUsd, 50);
+    assert.equal(result.stats.skipped_cap, 0);
+    assert.equal(result.stats.attempted, 1);
+  });
+
   it("treats junk getleads emails as missing and waterfalls with an existing Apify domain", async () => {
     const person = {
       engagerFirstName: "Pat",
@@ -379,6 +433,47 @@ describe("pull cursor + webhook map", () => {
       cap: 5000,
     });
     assert.equal(sent[0].length, 1);
+  });
+
+  it("still waterfalls when month-to-date spend is already over the old monthly cap", async () => {
+    const sent = [];
+    const result = await resolveEmails({
+      leads: [
+        {
+          engagerFirstName: "Pat",
+          engagerLastName: "Lee",
+          engagerCompany: "Acme",
+          engagerEmployees: "11 to 50",
+          engagerEmail: "x",
+          engagerLinkedinUrl: "https://www.linkedin.com/in/pat-lee",
+          companyDomain: "acme.com",
+        },
+      ],
+      waterfall: {
+        async health() { return { ok: true }; },
+        async ensureClient() { return { ok: true }; },
+        async enrich({ rows }) {
+          sent.push(rows);
+          return { job_id: "job-uncap" };
+        },
+        async waitForJob() { return { status: "completed" }; },
+      },
+      config: { emailWaterfallMcpUrl: "https://example.test/mcp", waterfallClientTag: "salesglider", waterfallCentsPerRow: 15 },
+      spend: { spendCents: 16732 },
+      supabase: {
+        from() {
+          return { select() { return { in() { return { data: [], error: null }; } }; } };
+        },
+        async rpc() {
+          return { data: { month_key: "2026-08", apify_cents: 0, waterfall_cents: 15, verifier_cents: 0 }, error: null };
+        },
+      },
+      log: { info() {}, warn() {} },
+      cap: 500,
+    });
+    assert.equal(sent.length, 1);
+    assert.equal(result.stats.skipped_cap, 0);
+    assert.equal(result.stats.attempted, 1);
   });
 
   it("re-gates parked placeholder bands as missing size, not dq_size", () => {

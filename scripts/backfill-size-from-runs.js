@@ -69,7 +69,6 @@ async function main(env = process.env, argv = process.argv) {
     spend,
     supabase,
     log,
-    cap: config.monthlySpendCapCents,
     stats,
   });
 

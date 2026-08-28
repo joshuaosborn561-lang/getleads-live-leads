@@ -49,6 +49,15 @@ export function wouldExceedCap(spendCents, additionalCents, capCents) {
   return spendCents + additionalCents > capCents;
 }
 
+export function apifyJobCapUsd(config) {
+  const n = Number(config?.apifyJobCapUsd);
+  return Number.isFinite(n) && n > 0 ? n : 50;
+}
+
+export function wouldExceedApifyJob(estimatedCents, capUsd) {
+  return Number(estimatedCents || 0) > Number(capUsd || 50) * 100;
+}
+
 export function usdToCents(usd) {
   return Math.round(Number(usd || 0) * 100 * 1000) / 1000;
 }
