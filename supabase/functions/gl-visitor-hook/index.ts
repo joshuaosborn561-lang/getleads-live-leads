@@ -22,14 +22,53 @@ const str = (...vals: unknown[]) => {
   }
   return null;
 };
-const PHONE_KEY = /^(phone|mobile|cell|cellphone|phone_number|phonenumber|mobile_phone|mobilephone|direct_dial|directdial|work_phone|cell_phone|cellphone|personal_phone)$/i;
+const PHONE_KEY = /^(phone|mobile|cell|cellphone|phones|personcellphone|phone_number|phonenumber|mobile_phone|mobilephone|direct_dial|directdial|work_phone|cell_phone|personal_phone)$/i;
+const valuesOf = (...vals: unknown[]) => {
+  const out: string[] = [];
+  const push = (v: unknown) => {
+    if (v == null) return;
+    if (typeof v === "number" && Number.isFinite(v)) {
+      out.push(String(v));
+      return;
+    }
+    if (typeof v !== "string") {
+      if (Array.isArray(v)) v.forEach(push);
+      else if (typeof v === "object") {
+        const r = rec(v);
+        push(r.value ?? r.email ?? r.phone ?? r.number);
+      }
+      return;
+    }
+    const t = v.trim();
+    if (!t) return;
+    if (t.startsWith("[") || t.startsWith("{")) {
+      try {
+        push(JSON.parse(t));
+        return;
+      } catch { /* plain string */ }
+    }
+    for (const part of t.split(/[,;|]/)) {
+      const p = part.trim();
+      if (p) out.push(p);
+    }
+  };
+  vals.forEach(push);
+  return out;
+};
+const firstEmail = (...vals: unknown[]) => {
+  for (const v of valuesOf(...vals)) {
+    const e = v.toLowerCase();
+    if (e.includes("@")) return e;
+  }
+  return null;
+};
 const phoneOf = (...objs: Record<string, unknown>[]) => {
   for (const o of objs) {
-    const v = str(
-      o.phone, o.mobile, o.cell, o.cellphone, o.phone_number, o.phoneNumber,
-      o.mobile_phone, o.mobilePhone, o.direct_dial, o.directDial, o.work_phone,
-      o.cell_phone, o.cellPhone, o.personal_phone,
-    );
+    const v = valuesOf(
+      o.personCellphone, o.person_cellphone, o.phones, o.phone, o.mobile, o.cell, o.cellphone,
+      o.phone_number, o.phoneNumber, o.mobile_phone, o.mobilePhone, o.direct_dial, o.directDial,
+      o.work_phone, o.cell_phone, o.cellPhone, o.personal_phone,
+    ).find((p) => /[0-9]{7,}/.test(p));
     if (v) return v;
     const custom = o.custom_fields ?? o.customFields ?? o.custom;
     if (Array.isArray(custom)) {
@@ -96,26 +135,37 @@ const clip = (raw: string, max = 700) => {
 const quote = (raw: string) => clip(raw, 600).split("\n").map((l) => `> ${l}`).join("\n");
 
 async function mapVisitor(it: Record<string, unknown>, siteHint: string | null) {
-  const person = nest(it, "person", "visitor", "lead", "contact");
+  const person = nest(it, "person", "visitor", "contact");
+  const lead = nest(it, "lead");
+  const src = { ...lead, ...it, ...person };
   const company = nest(it, "company", "organization");
   const visit = nest(it, "visit", "session");
-  let first = str(person.first_name, person.firstName, it.first_name, it.firstName);
-  let last = str(person.last_name, person.lastName, it.last_name, it.lastName);
-  const full = str(person.name, person.full_name, it.name, it.full_name, [first, last].filter(Boolean).join(" ") || null);
+  let first = str(src.personFirstName, src.first_name, src.firstName, person.first_name, person.firstName);
+  let last = str(src.personLastName, src.last_name, src.lastName, person.last_name, person.lastName);
+  const full = str(
+    src.personFullName, src.full_name, src.name, person.name, person.full_name,
+    [first, last].filter(Boolean).join(" ") || null,
+  );
   if (!first && full) {
     const p = full.split(/\s+/);
     first = p[0] || null;
     last = last || p.slice(1).join(" ") || null;
   }
-  const email = (str(person.work_email, person.email, it.work_email, it.email) || "").toLowerCase() || null;
-  const phone = phoneOf(person, nest(it, "visitor"), it);
-  const linkedin = liOf(str(person.linkedin_url, person.linkedin, person.profile_url, it.linkedin_url, it.linkedin));
-  const companyName = str(company.name, company.company_name, it.company_name, it.engagerCompany);
-  const companyDomain = domainOf(str(company.domain, company.website, it.company_domain, it.domain));
-  const page = str(visit.page, visit.page_url, visit.url, visit.landing_page, it.page_url, it.url, it.page);
-  const visitorId = str(it.visitorId, it.visitor_id, person.id, it.sessionId);
-  const leadId = str(it.leadId, it.lead_id, it.dedupeKey, it.dedupe_key);
-  const site = str(siteHint, it.site, it.site_id, hostOf(page), companyDomain);
+  const email = firstEmail(
+    src.personEmail, src.work_email, src.email, src.businessEmails,
+    person.work_email, person.email, src.personalEmails,
+  );
+  const phone = phoneOf(src, person, lead, nest(it, "visitor"), it);
+  const linkedin = liOf(str(
+    src.personLinkedinUrl, src.linkedin_url, src.linkedin, src.profile_url,
+    person.linkedin_url, person.linkedin, person.profile_url,
+  ));
+  const companyName = str(src.companyName, src.company_name, company.name, company.company_name, it.engagerCompany);
+  const companyDomain = domainOf(str(src.companyDomain, src.company_domain, company.domain, company.website, src.domain, it.domain));
+  const page = str(src.pageUrl, src.page_url, visit.page, visit.page_url, visit.url, visit.landing_page, it.page, it.url);
+  const visitorId = str(src.visitorId, src.visitor_id, src.sessionId, person.id);
+  const leadId = str(src.leadId, src.lead_id, src.dedupeKey, src.dedupe_key);
+  const site = str(siteHint, src.site, src.site_id, hostOf(page), companyDomain, domainOf(str(src.domain, it.domain)));
   const status = !email && !linkedin ? "needs_identity" : !companyName ? "needs_company" : !email ? "needs_email" : "received";
   return {
     dedupe_key: leadId || visitorId || email || linkedin || await hashKey([full || "", companyName || "", companyDomain || "", page || "", site || ""]),
@@ -127,14 +177,14 @@ async function mapVisitor(it: Record<string, unknown>, siteHint: string | null) 
     email,
     phone,
     linkedin_url: linkedin,
-    job_title: str(person.title, person.job_title, person.headline, it.title, it.job_title),
+    job_title: str(src.personTitle, src.title, src.job_title, src.headline, person.title, person.job_title, person.headline),
     company_name: companyName,
     company_domain: companyDomain,
-    company_employees: str(company.employee_count, company.size, company.employees, it.employees),
+    company_employees: str(src.companyEmployees, src.company_employees, company.employee_count, company.size, company.employees),
     page_url: page,
-    visited_at: tsOf(visit.ts, visit.timestamp, visit.visited_at, it.timestamp, it.ts),
-    city: str(person.city, it.city, company.city),
-    country: str(person.country, it.country, company.country),
+    visited_at: tsOf(src.visitedAt, src.capturedAt, src.visited_at, visit.ts, visit.timestamp, visit.visited_at, it.timestamp, it.ts),
+    city: str(src.personalCity, src.companyCity, src.city, person.city, company.city),
+    country: str(src.personalCountry, src.companyCountry, src.country, person.country, company.country),
     campaign_id: null,
     campaign_name: null,
     lane: "visitor",
@@ -208,6 +258,9 @@ async function matchHeyreach(token: string, row: Row) {
   let profile = row.linkedin_url;
   let phone: string | null = null;
   let found = false;
+  if (!row.email && !row.linkedin_url) {
+    return { found, profile_url: profile, phone, campaigns, messages };
+  }
   const camps = await hr(token, "/campaign/GetCampaignsForLead", { email: row.email, profileUrl: row.linkedin_url });
   if (camps.status < 400) {
     for (const it of hrItems(camps.json)) {
@@ -224,10 +277,12 @@ async function matchHeyreach(token: string, row: Row) {
     if (lead.status < 400 && (p.profileUrl || p.id || p.firstName)) found = true;
   }
   let convs: Record<string, unknown>[] = [];
+  const search = row.email || row.linkedin_url;
   for (const filters of [
-    { searchString: row.email || row.full_name, leadProfileUrl: row.linkedin_url },
-    { search_string: row.email || row.full_name, lead_profile_url: row.linkedin_url },
+    { searchString: search, leadProfileUrl: row.linkedin_url },
+    { search_string: search, lead_profile_url: row.linkedin_url },
   ]) {
+    if (!search) break;
     const conv = await hr(token, "/inbox/GetConversationsV2", { filters, offset: 0, limit: 10 });
     convs = hrItems(conv.json);
     if (convs.length || conv.status < 400) break;
@@ -373,7 +428,7 @@ Deno.serve(async (req: Request) => {
     rows.push(row);
   }
   const db = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-  const { error, count } = await db.from("sg_visitor_inbox").upsert(rows, { onConflict: "dedupe_key", ignoreDuplicates: true, count: "exact" });
+  const { error, count } = await db.from("sg_visitor_inbox").upsert(rows, { onConflict: "dedupe_key", ignoreDuplicates: false, count: "exact" });
   if (error) return new Response(JSON.stringify({ ok: false, error: error.message }), { status: 500, headers: { "Content-Type": "application/json" } });
   const notifyRes = [];
   for (const row of rows) {
