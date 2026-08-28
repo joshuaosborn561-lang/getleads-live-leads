@@ -184,6 +184,9 @@ async function mapVisitor(it: Record<string, unknown>, siteHint: string | null) 
     page_url: page,
     visited_at: tsOf(src.visitedAt, src.capturedAt, src.visited_at, visit.ts, visit.timestamp, visit.visited_at, it.timestamp, it.ts),
     city: str(src.personalCity, src.companyCity, src.city, person.city, company.city),
+    seniority: str(src.seniority, src.personSeniority, src.seniority_level),
+    department: str(src.personDepartment, src.department, src.function),
+    industry: str(src.companyIndustry, src.industry, company.industry),
     country: str(src.personalCountry, src.companyCountry, src.country, person.country, company.country),
     campaign_id: null,
     campaign_name: null,
@@ -317,12 +320,14 @@ async function matchHeyreach(token: string, row: Row) {
 function card(row: Row, sl: Awaited<ReturnType<typeof matchSmartlead>>, hrMatch: Awaited<ReturnType<typeof matchHeyreach>>) {
   const matched = sl.length > 0 || hrMatch.found;
   const name = row.full_name || [row.first_name, row.last_name].filter(Boolean).join(" ") || "Unknown visitor";
-  const li = hrMatch.profile_url || row.linkedin_url;
+  const li = row.linkedin_url || (hrMatch.found ? hrMatch.profile_url : null);
   const header = matched ? "Website visitor · MATCH" : "Website visitor · no outreach match";
+  const extra = rec(row as unknown as Record<string, unknown>);
   const who = [
-    li ? `*${name}* — <${li}|LinkedIn>` : `*${name}*`,
-    row.job_title,
-    [row.company_name, row.company_domain, row.company_employees].filter(Boolean).join(" · ") || null,
+    `*${name}*`,
+    li ? `LinkedIn: <${li}|open profile>` : "LinkedIn: _not found_",
+    [row.job_title, extra.seniority, extra.department].filter(Boolean).join(" · ") || null,
+    [row.company_name, row.company_domain, row.company_employees, extra.industry].filter(Boolean).join(" · ") || null,
     row.email ? `\`${row.email}\`` : null,
     row.phone ? `Cell: ${row.phone}` : "Cell: _not provided_",
     row.page_url ? `Landed on: ${row.page_url}` : null,
@@ -358,16 +363,53 @@ async function alreadySlacked(db: SB, row: Row) {
   return (count ?? 0) > 0;
 }
 
+async function qualifyLocal(db: SB, row: Row) {
+  const apply = (hit: Record<string, unknown> | null | undefined) => {
+    if (!hit) return;
+    row.linkedin_url = row.linkedin_url || liOf(str(hit.linkedin_url, hit.linkedin, hit.profile_url));
+    row.job_title = row.job_title || str(hit.job_title, hit.title);
+    row.company_name = row.company_name || str(hit.company_name);
+    row.phone = row.phone || phoneOf(hit);
+  };
+  if (row.email) {
+    const { data: wf } = await db.from("salesglider_wf_contacts")
+      .select("linkedin_url,job_title,cellphone,domain").ilike("email", row.email).limit(3);
+    for (const h of wf || []) apply({ ...h, phone: h.cellphone });
+    const { data: nb } = await db.from("name_bank")
+      .select("linkedin_url,job_title").ilike("resolved_email", row.email).limit(3);
+    for (const h of nb || []) apply(h);
+    const { data: px } = await db.from("pixel_visitor_events")
+      .select("linkedin_url,title,company_name").ilike("work_email", row.email).limit(3);
+    for (const h of px || []) apply({ ...h, job_title: h.title });
+  }
+  if (!row.linkedin_url && row.first_name && row.last_name && row.company_domain) {
+    const { data } = await db.from("salesglider_wf_contacts")
+      .select("linkedin_url,job_title,cellphone")
+      .ilike("first_name", row.first_name).ilike("last_name", row.last_name).ilike("domain", row.company_domain)
+      .limit(3);
+    if ((data || []).length === 1) apply({ ...data![0], phone: data![0].cellphone });
+    const { data: nb } = await db.from("name_bank")
+      .select("linkedin_url,job_title")
+      .ilike("first_name", row.first_name).ilike("last_name", row.last_name).ilike("domain", row.company_domain)
+      .limit(3);
+    if ((nb || []).length === 1) apply(nb![0]);
+  }
+  if ((!row.company_name || !row.company_employees) && row.company_domain) {
+    const { data } = await db.from("salesglider_wf_companies")
+      .select("company_name,employee_range").ilike("domain", row.company_domain).limit(1);
+    row.company_name = row.company_name || str(data?.[0]?.company_name);
+    row.company_employees = row.company_employees || str(data?.[0]?.employee_range);
+  }
+}
+
 async function notify(db: SB, row: Row) {
   if (await alreadySlacked(db, row)) return { slack: "deduped", matched: false };
   const slackTok = await secret(db, "slack_salesglider");
   const hrTok = await secret(db, "heyreach_salesglider");
+  await qualifyLocal(db, row);
   const sl = await matchSmartlead(db, row);
   const hrMatch = hrTok ? await matchHeyreach(hrTok, row) : { found: false, profile_url: row.linkedin_url, phone: null as string | null, campaigns: [] as string[], messages: [] as string[] };
-  if (!row.phone && row.email) {
-    const { data: wf } = await db.from("salesglider_wf_contacts").select("cellphone").ilike("email", row.email).not("cellphone", "is", null).neq("cellphone", "").limit(1);
-    row.phone = str(wf?.[0]?.cellphone) || row.phone;
-  }
+  row.linkedin_url = row.linkedin_url || (hrMatch.found ? hrMatch.profile_url : null);
   if (!row.phone) {
     const slKey = await secret(db, "smartlead_salesglider");
     if (slKey && row.email) {
@@ -379,6 +421,7 @@ async function notify(db: SB, row: Row) {
         const j = rec(await res.json().catch(() => ({})));
         const lead = rec((j.data as Record<string, unknown>[] | undefined)?.[0] || j.lead || j);
         row.phone = phoneOf(lead, rec(lead.custom_fields), rec(lead.lead));
+        row.linkedin_url = row.linkedin_url || liOf(str(lead.linkedin_profile, lead.linkedin, rec(lead.custom_fields).linkedin));
       } catch { /* leave empty */ }
     }
   }
@@ -400,8 +443,15 @@ async function notify(db: SB, row: Row) {
   }
   await db.from("sg_visitor_inbox").update({
     phone: row.phone,
+    linkedin_url: row.linkedin_url,
+    job_title: row.job_title,
+    company_name: row.company_name,
+    company_employees: row.company_employees,
     slack_ts: slackTs,
-    match: { smartlead_hits: sl.length, heyreach: hrMatch.found, slack: slackStatus, client_id: SL_CLIENT, has_phone: !!row.phone },
+    match: {
+      smartlead_hits: sl.length, heyreach: hrMatch.found, slack: slackStatus, client_id: SL_CLIENT,
+      has_phone: !!row.phone, has_linkedin: !!row.linkedin_url,
+    },
   }).eq("dedupe_key", row.dedupe_key);
   return { slack: slackStatus, matched: c.matched };
 }
@@ -428,7 +478,11 @@ Deno.serve(async (req: Request) => {
     rows.push(row);
   }
   const db = createClient(Deno.env.get("SUPABASE_URL")!, Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!);
-  const { error, count } = await db.from("sg_visitor_inbox").upsert(rows, { onConflict: "dedupe_key", ignoreDuplicates: false, count: "exact" });
+  const stored = rows.map((row) => {
+    const { seniority: _s, department: _d, industry: _i, ...rest } = row as Row & Record<string, unknown>;
+    return rest;
+  });
+  const { error, count } = await db.from("sg_visitor_inbox").upsert(stored, { onConflict: "dedupe_key", ignoreDuplicates: false, count: "exact" });
   if (error) return new Response(JSON.stringify({ ok: false, error: error.message }), { status: 500, headers: { "Content-Type": "application/json" } });
   const notifyRes = [];
   for (const row of rows) {
