@@ -1,0 +1,2 @@
+[functions.gl-visitor-hook]
+verify_jwt = false

@@ -44,6 +44,8 @@ Terminal, never reprocessed: `dq_size`, `pending_campaign`, `suppressed`, `dupli
 
 The webhook is the only insert path into `sg_engager_inbox`. Re-POSTing the same `dedupeKey` is a no-op (`ignoreDuplicates`). `dedupeKey` is getleads `leadId`. Never invent one.
 
+Website visitors insert only through `gl-visitor-hook` into `sg_visitor_inbox`. Visitors with an email who are not already in a SalesGlider Smartlead campaign are imported to campaign `3916543` (SalesGlider Warm Web Visitors). The hook never starts or pauses that campaign.
+
 ## Loops
 
 - **Pull** every `RUN_INTERVAL_MINUTES` (60): high-water mark per `profileId` on `capturedAt`, gates, optional paid resolve (capped by `ENRICHMENT_BATCH_LIMIT`), webhook batches of 200.
